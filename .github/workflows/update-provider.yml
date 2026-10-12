@@ -1,0 +1,58 @@
+name: Update provider
+
+# A new @router-for-me/pi-cliproxyapi-provider release on npm: update package.json + package-lock.json, install exactly
+# that lock, typecheck and run every test (the Pi loader test included), and only then commit the two files to main.
+# Any failed step fails the run and nothing is pushed. The oh-my-pi-extensions umbrella's hourly "Update submodules"
+# workflow then moves its cliproxyapi gitlink to this commit.
+on:
+  schedule:
+    - cron: '41 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-provider
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the locked dependencies
+        run: npm ci --legacy-peer-deps
+      - name: Detect a new provider release and update package.json + package-lock.json
+        id: update
+        run: node scripts/update-provider.ts
+      - name: Install the updated lock
+        if: steps.update.outputs.updated == 'true'
+        run: npm ci --legacy-peer-deps
+      - name: Typecheck
+        if: steps.update.outputs.updated == 'true'
+        run: npm run typecheck
+      - name: Test
+        if: steps.update.outputs.updated == 'true'
+        run: npm test
+      - name: Commit and push the update
+        if: steps.update.outputs.updated == 'true'
+        env:
+          FROM: ${{ steps.update.outputs.from }}
+          VERSION: ${{ steps.update.outputs.version }}
+        run: |
+          # Exactly the manifest and the lock: anything else changed or created stops the run.
+          other=$(git status --porcelain -- . ':!package.json' ':!package-lock.json')
+          if [ -n "$other" ] || git diff --quiet -- package.json || git diff --quiet -- package-lock.json; then
+            echo "Unexpected change set:" >&2
+            git status --porcelain >&2
+            exit 1
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json package-lock.json
+          git commit -m "chore: update @router-for-me/pi-cliproxyapi-provider $FROM -> $VERSION"
+          git push

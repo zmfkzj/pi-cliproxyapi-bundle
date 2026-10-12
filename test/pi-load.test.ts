@@ -14,7 +14,7 @@ import { PACKAGE_NAME } from "../src/index.ts";
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CATALOG = { models: [{ slug: "fake-model", display_name: "Fake Model", context_window: 100_000, input_modalities: ["text"], supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] };
 
-async function start(t: TestContext, options: { separateInstall?: boolean } = {}) {
+async function start(t: TestContext, options: { separateInstall?: boolean; loadSeparate?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pi cliproxyapi it "));
   const agentDir = join(root, "agent");
   mkdirSync(agentDir, { recursive: true });
@@ -31,7 +31,10 @@ async function start(t: TestContext, options: { separateInstall?: boolean } = {}
   Object.assign(process.env, { PI_CODING_AGENT_DIR: agentDir, CLIPROXYAPI_BASE_URL: `http://127.0.0.1:${port}`, CLIPROXYAPI_API_KEY: "dummy-test-key" });
   delete process.env.PI_CLIPROXYAPI_BUNDLED;
   const settingsManager = SettingsManager.inMemory({});
-  const loader = new DefaultResourceLoader({ cwd: root, agentDir, settingsManager, additionalExtensionPaths: [packageDir], noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+  // loadSeparate: also load the provider package itself, as Pi does for the separate `npm:` install in the settings.
+  const providerDir = dirname(fileURLToPath(import.meta.resolve(`${PACKAGE_NAME}/package.json`)));
+  const paths = [packageDir, ...(options.loadSeparate ? [providerDir] : [])];
+  const loader = new DefaultResourceLoader({ cwd: root, agentDir, settingsManager, additionalExtensionPaths: paths, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
   await loader.reload();
   const { session } = await createAgentSession({ cwd: root, agentDir, resourceLoader: loader, settingsManager, sessionManager: SessionManager.inMemory(root) });
   const errors: string[] = [];
@@ -68,4 +71,14 @@ test("with the package also installed on its own, the bundle loads nothing (no d
   assert.equal(commands.includes("fast"), false);
   assert.equal(h.session.modelRuntime.getModel("cliproxyapi", "fake-model"), undefined);
   assert.deepEqual(h.requests, []);
+});
+
+test("bundle and separate install loaded together: every command and the provider exist exactly once", { timeout: 60_000 }, async (t) => {
+  const h = await start(t, { separateInstall: true, loadSeparate: true });
+  assert.deepEqual(h.loader.getExtensions().errors, []);
+  assert.deepEqual(h.errors, []);
+  const commands = h.session.extensionRunner.getRegisteredCommands().map(command => command.name);
+  for (const name of ["fast", "pause", "continue", "cliproxyapi-refresh"]) assert.equal(commands.filter(command => command === name).length, 1, name);
+  assert.equal(h.session.modelRuntime.getProviders().filter(provider => provider.id === "cliproxyapi").length, 1);
+  assert.ok(h.session.modelRuntime.getModel("cliproxyapi", "fake-model"), "the separate install registers the models");
 });
