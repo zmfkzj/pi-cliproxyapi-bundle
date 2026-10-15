@@ -40,6 +40,21 @@ To switch from a separate install to the bundled one, remove `npm:@router-for-me
 
 A running [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) and its API key: `/login CLIProxyAPI`, or `~/.pi/agent/cliproxyapi.json`, or `CLIPROXYAPI_BASE_URL` / `CLIPROXYAPI_API_KEY`. Without them the provider appears in `/login` and lists no models.
 
+## `/cliproxyapi doctor` and `/cliproxyapi install-deps`
+
+This bundle's own command (the upstream provider has no `/cliproxyapi`; its commands are `/cliproxyapi-refresh`, `/fast`, `/pause`, `/continue`). It is registered before the bundle decides whether to load the provider, so it is available in every mode (bundled, separate install, `PI_CLIPROXYAPI_BUNDLED=off`) without loading the provider twice. The oh-my-pi-extensions umbrella runs the same checks from `/oh-my-pi doctor` and `/oh-my-pi install-deps`.
+
+`/cliproxyapi doctor` is read-only and reports, with an action for every problem:
+
+- **CLIProxyAPI provider**: which install is active: the bundled copy (loaded, or failed to load: error), the separate install (ok, with the settings file that installs it), `PI_CLIPROXYAPI_BUNDLED=off` without a separate install (manual: the provider is not loaded), or `PI_CLIPROXYAPI_BUNDLED=on` together with a separate install (error: loads twice).
+- **npm @router-for-me/pi-cliproxyapi-provider**: the bundled copy is installed and matches the version `package-lock.json` pins. Missing is an error while the bundled copy is the active one (an optional warning otherwise); a different version is a warning (`npm ci --legacy-peer-deps`).
+- **cliproxyapi.json**: an error if it exists but is not a JSON object (the provider then ignores it).
+- **CLIProxyAPI base URL**: resolved as the upstream provider does (`CLIPROXYAPI_BASE_URL` → `cliproxyapi.json` → `/login` in `auth.json` → `http://127.0.0.1:8317`, honoring `providerId`/`providerName`); shows the origin and its source.
+- **CLIProxyAPI API key**: "set" with its source, or "not set" (manual: `/login CLIProxyAPI`, `CLIPROXYAPI_API_KEY` or `apiKey` in `cliproxyapi.json`). Keys are never shown.
+- **CLIProxyAPI server**: one `GET {root}/v1/models?client_version=pi` with a 3 s timeout (no inference). 200 is ok; 401/403 with a key is manual (log in again); connection refused or unknown host is an error (start the server or fix the base URL); a timeout or other network failure is unverified, with a `curl` command to check by hand.
+
+`/cliproxyapi install-deps` installs only the bundled npm dependency, with `npm install --legacy-peer-deps` in this package's directory when it is missing ("already installed" otherwise; repeatable). Inside an npm-installed package it does not run npm and asks for `pi update --extensions` instead. It then re-checks and reports the CLIProxyAPI server, the API key and `/login` as manual actions; it never starts the server or writes credentials. A separate install is updated by Pi (`pi update --extensions`), not by this command. Run `/reload` after an install. Works wherever Pi and npm run.
+
 ## Development
 
 ```sh
@@ -48,4 +63,4 @@ npm run typecheck
 npm test
 ```
 
-`test/pi-load.test.ts` loads this package with Pi's resource loader in an isolated agent directory against a local stand-in for CLIProxyAPI (catalog only, dummy key, no inference request) and checks the registered `cliproxyapi` model and commands, that a separate install in the settings turns the bundle off, and that loading the bundle together with the separately installed provider registers every command and the provider exactly once. `test/update-provider.test.ts` covers the update script (no-op, update, and every failure that must stop the workflow).
+`test/pi-load.test.ts` loads this package with Pi's resource loader in an isolated agent directory against a local stand-in for CLIProxyAPI (catalog only, dummy key, no inference request) and checks the registered `cliproxyapi` model and commands, that a separate install in the settings turns the bundle off, and that loading the bundle together with the separately installed provider registers every command and the provider exactly once; `/cliproxyapi` stays registered (and its doctor reports the active install) with a separate install and with `PI_CLIPROXYAPI_BUNDLED=off`. `test/doctor.test.ts` covers doctor and install-deps with a temporary package directory, a local stand-in server and a fake npm. `test/update-provider.test.ts` covers the update script (no-op, update, and every failure that must stop the workflow).

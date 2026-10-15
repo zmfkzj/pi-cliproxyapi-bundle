@@ -61,14 +61,33 @@ test("PI_CLIPROXYAPI_BUNDLED forces on or off; auto follows the settings", (t) =
   assert.equal(decideBundle({ ...base, env: { PI_CLIPROXYAPI_BUNDLED: "off" } }).load, false);
 });
 
-test("the bundle runs the upstream entries in order, or none of them", async (t) => {
+/** The parts of ExtensionAPI the bundle itself uses (the upstream factories are replaced). */
+function fakePi() {
+  const commands: string[] = [];
+  const channels: string[] = [];
+  const pi = { registerCommand: (name: string) => { commands.push(name); }, events: { on: (channel: string) => { channels.push(channel); return () => {}; } } };
+  return { pi: pi as never, commands, channels };
+}
+
+test("the bundle runs the upstream entries in order, or none of them; /cliproxyapi is registered either way", async (t) => {
   const s = setup(t);
   const calls: string[] = [];
   const load = async () => [async () => { calls.push("index"); }, () => { calls.push("tps"); }];
   const base = { agentDir: s.agentDir, cwd: s.cwd, projectTrusted: false, env: {}, load };
-  await createCliproxyapiBundle(base)({} as never);
+  const bundled = fakePi();
+  await createCliproxyapiBundle(base)(bundled.pi);
   assert.deepEqual(calls, ["index", "tps"]);
+  assert.deepEqual(bundled.commands, ["cliproxyapi"]);
+  assert.deepEqual(bundled.channels, ["oh-my-pi-extensions:dependencies"]);
   s.settings(s.global, [`npm:${PACKAGE_NAME}`]);
-  await createCliproxyapiBundle(base)({} as never);
+  const separate = fakePi();
+  await createCliproxyapiBundle(base)(separate.pi);
   assert.deepEqual(calls, ["index", "tps"], "nothing more when installed on its own");
+  assert.deepEqual(separate.commands, ["cliproxyapi"], "the maintenance command stays available");
+  s.settings(s.global, []);
+  const off = fakePi();
+  await createCliproxyapiBundle({ ...base, env: { PI_CLIPROXYAPI_BUNDLED: "off" } })(off.pi);
+  assert.deepEqual(calls, ["index", "tps"], "nothing more when off");
+  assert.deepEqual(off.commands, ["cliproxyapi"]);
+  assert.deepEqual(off.channels, ["oh-my-pi-extensions:dependencies"]);
 });

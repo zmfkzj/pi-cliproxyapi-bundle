@@ -14,7 +14,7 @@ import { PACKAGE_NAME } from "../src/index.ts";
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CATALOG = { models: [{ slug: "fake-model", display_name: "Fake Model", context_window: 100_000, input_modalities: ["text"], supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] };
 
-async function start(t: TestContext, options: { separateInstall?: boolean; loadSeparate?: boolean } = {}) {
+async function start(t: TestContext, options: { separateInstall?: boolean; loadSeparate?: boolean; bundled?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pi cliproxyapi it "));
   const agentDir = join(root, "agent");
   mkdirSync(agentDir, { recursive: true });
@@ -29,7 +29,7 @@ async function start(t: TestContext, options: { separateInstall?: boolean; loadS
   const port = (server.address() as { port: number }).port;
   const saved = Object.fromEntries(["PI_CODING_AGENT_DIR", "CLIPROXYAPI_BASE_URL", "CLIPROXYAPI_API_KEY", "PI_CLIPROXYAPI_BUNDLED"].map(key => [key, process.env[key]]));
   Object.assign(process.env, { PI_CODING_AGENT_DIR: agentDir, CLIPROXYAPI_BASE_URL: `http://127.0.0.1:${port}`, CLIPROXYAPI_API_KEY: "dummy-test-key" });
-  delete process.env.PI_CLIPROXYAPI_BUNDLED;
+  if (options.bundled) process.env.PI_CLIPROXYAPI_BUNDLED = options.bundled; else delete process.env.PI_CLIPROXYAPI_BUNDLED;
   const settingsManager = SettingsManager.inMemory({});
   // loadSeparate: also load the provider package itself, as Pi does for the separate `npm:` install in the settings.
   const providerDir = dirname(fileURLToPath(import.meta.resolve(`${PACKAGE_NAME}/package.json`)));
@@ -54,7 +54,7 @@ test("the official provider loads through the bundle and registers cliproxyapi m
   assert.deepEqual(h.loader.getExtensions().errors, []);
   assert.deepEqual(h.errors, []);
   const commands = h.session.extensionRunner.getRegisteredCommands().map(command => command.name);
-  for (const name of ["fast", "pause", "continue", "cliproxyapi-refresh"]) assert.equal(commands.filter(command => command === name).length, 1, name);
+  for (const name of ["fast", "pause", "continue", "cliproxyapi-refresh", "cliproxyapi"]) assert.equal(commands.filter(command => command === name).length, 1, name);
   const model = h.session.modelRuntime.getModel("cliproxyapi", "fake-model");
   assert.ok(model, "cliproxyapi/fake-model registered");
   assert.equal(model.name, "Fake Model");
@@ -71,6 +71,12 @@ test("with the package also installed on its own, the bundle loads nothing (no d
   assert.equal(commands.includes("fast"), false);
   assert.equal(h.session.modelRuntime.getModel("cliproxyapi", "fake-model"), undefined);
   assert.deepEqual(h.requests, []);
+  assert.equal(commands.filter(command => command === "cliproxyapi").length, 1, "the maintenance command stays available");
+  const text = await doctor(h);
+  assert.match(text, /^pi-cliproxyapi-bundle doctor: healthy\n/);
+  assert.match(text, /\[ok\] CLIProxyAPI provider: the separate install is active \(.*settings\.json\); the bundled copy is not loaded/);
+  assert.match(text, /\[ok\] CLIProxyAPI server: models endpoint reachable at http:\/\/127\.0\.0\.1:\d+, API key accepted/);
+  assert.ok(!text.includes("dummy-test-key"), "the key is never shown");
 });
 
 test("bundle and separate install loaded together: every command and the provider exist exactly once", { timeout: 60_000 }, async (t) => {
@@ -78,7 +84,28 @@ test("bundle and separate install loaded together: every command and the provide
   assert.deepEqual(h.loader.getExtensions().errors, []);
   assert.deepEqual(h.errors, []);
   const commands = h.session.extensionRunner.getRegisteredCommands().map(command => command.name);
-  for (const name of ["fast", "pause", "continue", "cliproxyapi-refresh"]) assert.equal(commands.filter(command => command === name).length, 1, name);
+  for (const name of ["fast", "pause", "continue", "cliproxyapi-refresh", "cliproxyapi"]) assert.equal(commands.filter(command => command === name).length, 1, name);
   assert.equal(h.session.modelRuntime.getProviders().filter(provider => provider.id === "cliproxyapi").length, 1);
   assert.ok(h.session.modelRuntime.getModel("cliproxyapi", "fake-model"), "the separate install registers the models");
 });
+
+test("PI_CLIPROXYAPI_BUNDLED=off loads no provider but keeps /cliproxyapi, whose doctor says why", { timeout: 60_000 }, async (t) => {
+  const h = await start(t, { bundled: "off" });
+  assert.deepEqual(h.errors, []);
+  const commands = h.session.extensionRunner.getRegisteredCommands().map(command => command.name);
+  assert.deepEqual(commands, ["cliproxyapi"]);
+  assert.equal(h.session.modelRuntime.getModel("cliproxyapi", "fake-model"), undefined);
+  const text = await doctor(h);
+  assert.match(text, /^pi-cliproxyapi-bundle doctor: manual action required\n/);
+  assert.match(text, /\[manual\] CLIProxyAPI provider: not loaded: PI_CLIPROXYAPI_BUNDLED=off, and no separate install\n {6}-> Unset PI_CLIPROXYAPI_BUNDLED/);
+});
+
+/** Run the registered `/cliproxyapi doctor` and return its notification. */
+async function doctor(h: Awaited<ReturnType<typeof start>>): Promise<string> {
+  const command = h.session.extensionRunner.getRegisteredCommands().find(entry => entry.name === "cliproxyapi");
+  assert.ok(command, "/cliproxyapi registered");
+  const notes: string[] = [];
+  await command.handler("doctor", { ui: { notify: (text: string) => notes.push(text), setStatus: () => {} } } as never);
+  assert.equal(notes.length, 1);
+  return notes[0]!;
+}

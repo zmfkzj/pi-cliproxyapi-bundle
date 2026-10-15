@@ -6,10 +6,17 @@
  * When the same package is also installed on its own (a `packages` entry in Pi's settings), that install is the one Pi
  * loads and this bundle stays out of the way, so the provider, its commands and its footer never load twice.
  * `PI_CLIPROXYAPI_BUNDLED=on|off` forces either way (default `auto`).
+ *
+ * `/cliproxyapi doctor|install-deps` (src/doctor.ts) and the umbrella's dependency provider are this bundle's own and are
+ * registered in every mode, before that decision.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { getAgentDir, ProjectTrustStore, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerCliproxyapiCommand, type BundleState, type CliproxyapiDoctorOptions } from "./doctor.ts";
+
+export { checkCliproxyapi, createCliproxyapiDependencyProvider, installCliproxyapi, registerCliproxyapiCommand, resolveConnectionSettings } from "./doctor.ts";
+export type { BundleState, CliproxyapiDoctorOptions } from "./doctor.ts";
 
 export const PACKAGE_NAME = "@router-for-me/pi-cliproxyapi-provider";
 /** The upstream package's own `pi.extensions` entries, in its order. */
@@ -86,10 +93,36 @@ export async function loadUpstream(): Promise<Factory[]> {
   return modules.map(module => module.default);
 }
 
-export function createCliproxyapiBundle(options: { env?: NodeJS.ProcessEnv; agentDir?: string; cwd?: string; projectTrusted?: boolean; load?: () => Promise<Factory[]> } = {}) {
+export interface CliproxyapiBundleOptions {
+  env?: NodeJS.ProcessEnv;
+  agentDir?: string;
+  cwd?: string;
+  projectTrusted?: boolean;
+  load?: () => Promise<Factory[]>;
+  /** Seams of `/cliproxyapi doctor|install-deps` (tests): package dir, fetch, probe timeout, npm runner. */
+  doctor?: Omit<CliproxyapiDoctorOptions, "state" | "env" | "agentDir">;
+}
+
+export function createCliproxyapiBundle(options: CliproxyapiBundleOptions = {}) {
   return async function cliproxyapiBundle(pi: ExtensionAPI): Promise<void> {
-    if (!decideBundle(options).load) return;
-    for (const factory of await (options.load ?? loadUpstream)()) await factory(pi);
+    // The maintenance command and the umbrella's dependency provider are registered before the bundle decides whether
+    // to load the upstream provider, so they exist with a separate install or PI_CLIPROXYAPI_BUNDLED=off as well.
+    const state: BundleState = {
+      separateInstalls: () => separateInstalls({ agentDir: options.agentDir ?? getAgentDir(), cwd: options.cwd ?? process.cwd(),
+        ...(options.projectTrusted !== undefined ? { projectTrusted: options.projectTrusted } : {}) }),
+    };
+    registerCliproxyapiCommand(pi, { ...options.doctor, state,
+      ...(options.env ? { env: options.env } : {}), ...(options.agentDir ? { agentDir: options.agentDir } : {}) });
+    const decision = decideBundle(options);
+    state.decision = decision;
+    if (!decision.load) return;
+    try {
+      for (const factory of await (options.load ?? loadUpstream)()) await factory(pi);
+      state.loaded = true;
+    } catch (error) {
+      state.loadError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
   };
 }
 
