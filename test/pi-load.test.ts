@@ -8,8 +8,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { PACKAGE_NAME } from "../src/index.ts";
+import { isolateProvider } from "./helpers/offline-provider.ts";
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CATALOG = { models: [{ slug: "fake-model", display_name: "Fake Model", context_window: 100_000, input_modalities: ["text"], supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }] };
@@ -27,25 +28,29 @@ async function start(t: TestContext, options: { separateInstall?: boolean; loadS
   });
   await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
   const port = (server.address() as { port: number }).port;
-  const saved = Object.fromEntries(["PI_CODING_AGENT_DIR", "CLIPROXYAPI_BASE_URL", "CLIPROXYAPI_API_KEY", "PI_CLIPROXYAPI_BUNDLED"].map(key => [key, process.env[key]]));
-  Object.assign(process.env, { PI_CODING_AGENT_DIR: agentDir, CLIPROXYAPI_BASE_URL: `http://127.0.0.1:${port}`, CLIPROXYAPI_API_KEY: "dummy-test-key" });
-  if (options.bundled) process.env.PI_CLIPROXYAPI_BUNDLED = options.bundled; else delete process.env.PI_CLIPROXYAPI_BUNDLED;
+  const restore = isolateProvider(t, agentDir, `http://127.0.0.1:${port}`, options.bundled ?? "auto");
+  let session: AgentSession | undefined;
+  t.after(async () => {
+    try {
+      await session?.abort();
+      await session?.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    } finally {
+      session?.dispose();
+      server.closeAllConnections();
+      await new Promise<void>(done => server.close(() => done()));
+      rmSync(root, { recursive: true, force: true });
+      restore();
+    }
+  });
   const settingsManager = SettingsManager.inMemory({});
   // loadSeparate: also load the provider package itself, as Pi does for the separate `npm:` install in the settings.
   const providerDir = dirname(fileURLToPath(import.meta.resolve(`${PACKAGE_NAME}/package.json`)));
   const paths = [packageDir, ...(options.loadSeparate ? [providerDir] : [])];
   const loader = new DefaultResourceLoader({ cwd: root, agentDir, settingsManager, additionalExtensionPaths: paths, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
   await loader.reload();
-  const { session } = await createAgentSession({ cwd: root, agentDir, resourceLoader: loader, settingsManager, sessionManager: SessionManager.inMemory(root) });
+  ({ session } = await createAgentSession({ cwd: root, agentDir, resourceLoader: loader, settingsManager, sessionManager: SessionManager.inMemory(root) }));
   const errors: string[] = [];
   await session.bindExtensions({ onError: error => errors.push(String((error as { error?: unknown }).error ?? error)) });
-  t.after(async () => {
-    await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-    session.dispose();
-    await new Promise(done => server.close(done));
-    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
-    rmSync(root, { recursive: true, force: true });
-  });
   return { loader, session, errors, requests };
 }
 

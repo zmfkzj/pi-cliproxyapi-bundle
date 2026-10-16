@@ -9,7 +9,8 @@ pi install git:github.com/zmfkzj/pi-cliproxyapi-bundle   # on its own; the umbre
 ## Version and compatibility
 
 - This package depends on `@router-for-me/pi-cliproxyapi-provider` `^1.4.22`; its `package-lock.json` pins 1.4.22 (npm integrity recorded), so an install (on its own, or by the umbrella's bootstrap, which runs `npm install` in each submodule) is reproducible.
-- Upstream declares peer `@earendil-works/pi-coding-agent >=0.82.0` and `@earendil-works/pi-ai *` (host-provided, never installed as copies) and Node ≥ 22.19. Verified loading with Pi 1.1.0.
+- Upstream declares peer `@earendil-works/pi-coding-agent >=0.82.0` and `@earendil-works/pi-ai *` (host-provided, never installed as copies) and Node ≥ 22.19. Loading and offline SSE streaming are verified with coding-agent **1.3.0**, pi-ai **1.3.0**, and provider **1.4.22**.
+- Upstream's `extensions/codex-stream.ts` patches the installed Pi AI private Codex implementation at runtime. Its existing patch works with the tested 1.3.0 source; this bundle adds no replacement stream, compatibility shim, or `node_modules` edits. Future Pi/provider updates must pass the streaming tests as well as registration.
 
 ## Automatic provider updates
 
@@ -17,7 +18,7 @@ pi install git:github.com/zmfkzj/pi-cliproxyapi-bundle   # on its own; the umbre
 
 1. `npm ci`, then `node scripts/update-provider.ts` asks npm for the provider's `latest` version and compares it with the version `package-lock.json` installs (not the `^` range, which would hide a new minor). Same or older: nothing to do.
 2. Newer: `npm install @router-for-me/pi-cliproxyapi-provider@^<latest>` updates `package.json` and `package-lock.json` together; the script fails unless both end at the new version.
-3. `npm ci` of the new lock, `npm run typecheck` and `npm test` (including the Pi loader test with the real provider).
+3. `npm ci` of the new lock, `npm run typecheck` and `npm test` (including Pi loading and loopback SSE streaming through the real installed provider).
 4. Only when all of that passed: a commit of exactly those two files to `main` by `github-actions[bot]`, pushed with the workflow's `GITHUB_TOKEN`, the same direct-to-branch policy as the umbrella's "Update submodules" workflow. Any failed step fails the run (GitHub notifies the owner) and nothing is committed; the bundle stays on the last version that passed.
 
 The oh-my-pi-extensions umbrella's hourly "Update submodules" workflow then moves its `cliproxyapi` gitlink to that commit, and its bootstrap installs this package's lock in the `cliproxyapi/` submodule; the umbrella has no copy of the provider of its own. Requirements on GitHub: Actions enabled with read and write workflow permissions, and no branch protection on `main` that blocks `github-actions[bot]`; GitHub pauses scheduled workflows of a public repository after 60 days without activity.
@@ -64,3 +65,7 @@ npm test
 ```
 
 `test/pi-load.test.ts` loads this package with Pi's resource loader in an isolated agent directory against a local stand-in for CLIProxyAPI (catalog only, dummy key, no inference request) and checks the registered `cliproxyapi` model and commands, that a separate install in the settings turns the bundle off, and that loading the bundle together with the separately installed provider registers every command and the provider exactly once; `/cliproxyapi` stays registered (and its doctor reports the active install) with a separate install and with `PI_CLIPROXYAPI_BUNDLED=off`. `test/doctor.test.ts` covers doctor and install-deps with a temporary package directory, a local stand-in server and a fake npm. `test/update-provider.test.ts` covers the update script (no-op, update, and every failure that must stop the workflow).
+
+`test/pi-stream.test.ts` exercises the **actual installed provider adapter**, loaded through this bundle, with a scripted loopback HTTP/SSE server and the real Pi SDK. It verifies fragmented tool arguments (including escaped strings and split UTF-8), exactly-once tool execution and tool-result replay, malformed tool JSON with zero executions, malformed SSE, pending-read cancellation, provider retry exhaustion, and SDK retry exhaustion with one final settlement. Assertions cover the normalized endpoint, plain-key authentication without a ChatGPT account header, request payload/tool schemas, optional zstd request decoding, usage/cost, and Pi's payload/response/raw-event hooks. Provider retries and SDK retries are tested separately, so intermediate attempts are not mistaken for final outcomes.
+
+Both Pi integration suites isolate configuration in temporary directories, seed a synthetic pricing cache, and reject non-loopback fetches; allowed fetches use real HTTP, not a substituted provider stream or mocked fetch response. Run just these checks with `node --test test/pi-load.test.ts test/pi-stream.test.ts`. This is deterministic **mock-server protocol validation**, not a paid/live CLIProxyAPI or model test. Live authentication/OAuth refresh, WebSocket transport/fallback, image input, and real upstream timing remain unverified.
