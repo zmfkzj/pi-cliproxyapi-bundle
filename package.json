@@ -4,15 +4,26 @@
   "private": true,
   "description": "Bundles the official CLIProxyAPI provider (@router-for-me/pi-cliproxyapi-provider) into oh-my-pi-extensions, without loading it twice",
   "type": "module",
-  "keywords": ["pi-package", "pi-extension", "cliproxyapi"],
-  "files": ["src", "README.md"],
-  "pi": { "extensions": ["./src/index.ts"] },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "cliproxyapi"
+  ],
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test 'test/**/*.test.ts'"
   },
   "dependencies": {
-    "@router-for-me/pi-cliproxyapi-provider": "^1.4.22"
+    "@router-for-me/pi-cliproxyapi-provider": "^1.4.23"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -24,5 +35,7 @@
     "@types/node": "^22.19.19",
     "typescript": "^6.0.2"
   },
-  "engines": { "node": ">=22.19.0" }
+  "engines": {
+    "node": ">=22.19.0"
+  }
 }
