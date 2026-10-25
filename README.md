@@ -8,9 +8,9 @@ pi install git:github.com/zmfkzj/pi-cliproxyapi-bundle   # on its own; the umbre
 
 ## Version and compatibility
 
-- This package depends on `@router-for-me/pi-cliproxyapi-provider` `^1.4.22`; its `package-lock.json` pins 1.4.22 (npm integrity recorded), so an install (on its own, or by the umbrella's bootstrap, which runs `npm install` in each submodule) is reproducible.
-- Upstream declares peer `@earendil-works/pi-coding-agent >=0.82.0` and `@earendil-works/pi-ai *` (host-provided, never installed as copies) and Node ≥ 22.19. Loading and offline SSE streaming are verified with coding-agent **1.3.0**, pi-ai **1.3.0**, and provider **1.4.22**.
-- Upstream's `extensions/codex-stream.ts` patches the installed Pi AI private Codex implementation at runtime. Its existing patch works with the tested 1.3.0 source; this bundle adds no replacement stream, compatibility shim, or `node_modules` edits. Future Pi/provider updates must pass the streaming tests as well as registration.
+- This package depends on `@router-for-me/pi-cliproxyapi-provider` `^1.4.23`; its `package-lock.json` pins 1.4.23 (npm integrity recorded), so an install (on its own, or by the umbrella's bootstrap, which runs `npm install` in each submodule) is reproducible.
+- Upstream declares peer `@earendil-works/pi-coding-agent >=0.82.0` and `@earendil-works/pi-ai *` (host-provided, never installed as copies) and Node ≥ 22.19. Loading and offline SSE streaming are verified with coding-agent **1.4.0**, pi-ai **1.4.0**, and provider **1.4.23**.
+- Upstream's `extensions/codex-stream.ts` patches the installed Pi AI private Codex implementation at runtime. Its existing patch works with the tested 1.4.0 source (pi-ai 1.4.0 changed that file; the streaming tests pass unchanged); this bundle adds no replacement stream, compatibility shim, or `node_modules` edits. Future Pi/provider updates must pass the streaming tests as well as registration.
 
 ## Automatic provider updates
 
