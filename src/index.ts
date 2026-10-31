@@ -13,6 +13,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { getAgentDir, ProjectTrustStore, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { protectCodexModule, type CodexModuleProtection } from "./codex-cache.ts";
 import { registerCliproxyapiCommand, type BundleState, type CliproxyapiDoctorOptions } from "./doctor.ts";
 
 export { checkCliproxyapi, createCliproxyapiDependencyProvider, installCliproxyapi, registerCliproxyapiCommand, resolveConnectionSettings } from "./doctor.ts";
@@ -99,6 +100,12 @@ export interface CliproxyapiBundleOptions {
   cwd?: string;
   projectTrusted?: boolean;
   load?: () => Promise<Factory[]>;
+  /**
+   * Runs before the provider loads; default with the default `load`: keep the provider's patched Codex module from its
+   * shared file cache (src/codex-cache.ts). `protected: false` loads the provider with Codex streaming refused (warning,
+   * doctor error); a throw (no module hooks) does not load the provider, since it would import the file unprotected.
+   */
+  protect?: () => Promise<CodexModuleProtection>;
   /** Seams of `/cliproxyapi doctor|install-deps` (tests): package dir, fetch, probe timeout, npm runner. */
   doctor?: Omit<CliproxyapiDoctorOptions, "state" | "env" | "agentDir">;
 }
@@ -116,6 +123,22 @@ export function createCliproxyapiBundle(options: CliproxyapiBundleOptions = {}) 
     const decision = decideBundle(options);
     state.decision = decision;
     if (!decision.load) return;
+    const protect = options.protect ?? (options.load ? undefined : () => protectCodexModule({ agentDir: getAgentDir() }));
+    if (protect) {
+      let protection: CodexModuleProtection;
+      try {
+        protection = await protect();
+      } catch (error) {
+        state.loadError = `not loaded: ${error instanceof Error ? error.message : String(error)}`;
+        throw new Error(`[pi-cliproxyapi-bundle] ${state.loadError}`);
+      }
+      if (!protection.protected) {
+        state.codexModuleError = protection.reason ?? "unknown";
+        console.warn(`[pi-cliproxyapi-bundle] Codex streaming of the provider is disabled: ${state.codexModuleError}`);
+      } else if (protection.publishError) {
+        console.warn(`[pi-cliproxyapi-bundle] could not publish the shared Codex module cache (${protection.publishError}); this process does not read it`);
+      }
+    }
     try {
       for (const factory of await (options.load ?? loadUpstream)()) await factory(pi);
       state.loaded = true;

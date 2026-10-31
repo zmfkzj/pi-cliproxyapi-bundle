@@ -36,6 +36,8 @@ export interface BundleState {
   /** Whether the bundled upstream entries finished loading. */
   loaded?: boolean;
   loadError?: string;
+  /** Why the provider's patched Codex module could not be protected; its Codex streaming is refused (src/codex-cache.ts). */
+  codexModuleError?: string;
   /** The settings files that install the upstream package on its own (computed on demand). */
   separateInstalls?: () => string[];
 }
@@ -183,6 +185,10 @@ function providerItem(state: BundleState | undefined, env: NodeJS.ProcessEnv): D
     if (state?.loadError) {
       return { name, status: "error", detail: `the bundled copy failed to load: ${state.loadError}`,
         action: "Run /cliproxyapi install-deps, then /reload" };
+    }
+    if (state?.codexModuleError) {
+      return { name, status: "error", detail: `bundled copy loaded, but its Codex streaming is disabled: ${state.codexModuleError}`,
+        action: "Run /cliproxyapi install-deps, then /reload (a provider update that changed its Codex patching needs a bundle update)" };
     }
     return { name, status: "ok", detail: `bundled copy ${state?.loaded ? "loaded" : "selected"} (${decision.reason})` };
   }

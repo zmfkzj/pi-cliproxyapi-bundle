@@ -17,6 +17,9 @@ export function isolateProvider(t: TestContext, agentDir: string, baseUrl: strin
     HTTP_PROXY: "", HTTPS_PROXY: "", ALL_PROXY: "",
     http_proxy: "", https_proxy: "", all_proxy: "",
     NO_PROXY: "*", no_proxy: "*",
+    // The provider's patched Codex module cache lives under tmpdir(); keep these tests off the user's cache directory.
+    // Concurrent starts on one shared cache directory are covered by test/codex-cache.test.ts.
+    TMPDIR: join(agentDir, "tmp"),
   };
   const saved = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
   Object.assign(process.env, env);
