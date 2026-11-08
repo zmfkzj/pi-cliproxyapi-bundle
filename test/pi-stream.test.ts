@@ -9,11 +9,12 @@ import test, { type TestContext } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { zstdDecompressSync } from "node:zlib";
-import { Type, type AssistantMessage, type AssistantMessageEvent, type AssistantMessageEventStream, type Context } from "@earendil-works/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Context } from "@earendil-works/pi-ai";
 import {
   createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
   type AgentSession, type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { isolateProvider } from "./helpers/offline-provider.ts";
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
