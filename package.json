@@ -23,7 +23,7 @@
     "test": "node --test 'test/**/*.test.ts'"
   },
   "dependencies": {
-    "pi-cliproxyapi-provider": "^0.16.10"
+    "pi-cliproxyapi-provider": "^0.16.11"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
