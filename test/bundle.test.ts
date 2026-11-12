@@ -19,12 +19,17 @@ function setup(t: TestContext) {
 
 test("package sources that name the upstream package", (t) => {
   const s = setup(t);
-  for (const source of [`npm:${PACKAGE_NAME}`, `npm:${PACKAGE_NAME}@1.4.22`, "git:github.com/router-for-me/pi-cliproxyapi-provider", "https://github.com/router-for-me/pi-cliproxyapi-provider.git", "git:github.com/router-for-me/pi-cliproxyapi-provider@v1.4.22"]) {
+  for (const source of [`npm:${PACKAGE_NAME}`, `npm:${PACKAGE_NAME}@0.16.10`, "git:github.com/0xRichardH/pi-cliproxyapi-provider", "https://github.com/0xRichardH/pi-cliproxyapi-provider.git", "git:github.com/0xrichardh/pi-cliproxyapi-provider@master", "git@github.com:0xRichardH/pi-cliproxyapi-provider.git"]) {
     assert.equal(isUpstreamSource(source, s.dir), true, source);
   }
-  for (const source of ["npm:@router-for-me/pi-cliproxyapi-provider-fork", "npm:pi-cliproxyapi-provider", "https://github.com/zmfkzj/oh-my-pi-extensions.git", "./missing"]) {
+  // The former provider is a different package: its install does not stand in for this one (both would load).
+  for (const source of ["npm:@router-for-me/pi-cliproxyapi-provider", "git:github.com/router-for-me/pi-cliproxyapi-provider", "https://github.com/router-for-me/pi-cliproxyapi-provider.git",
+    "npm:pi-cliproxyapi-provider-fork", "https://github.com/zmfkzj/oh-my-pi-extensions.git", "./missing"]) {
     assert.equal(isUpstreamSource(source, s.dir), false, source);
   }
+  mkdirSync(join(s.dir, "former"));
+  writeFileSync(join(s.dir, "former", "package.json"), JSON.stringify({ name: "@router-for-me/pi-cliproxyapi-provider" }));
+  assert.equal(isUpstreamSource("./former", s.dir), false, "a checkout of the former provider");
   mkdirSync(join(s.dir, "checkout"));
   writeFileSync(join(s.dir, "checkout", "package.json"), JSON.stringify({ name: PACKAGE_NAME }));
   assert.equal(isUpstreamSource("./checkout", s.dir), true, "a local checkout, relative to the settings directory");
@@ -69,25 +74,25 @@ function fakePi() {
   return { pi: pi as never, commands, channels };
 }
 
-test("the bundle runs the upstream entries in order, or none of them; /cliproxyapi is registered either way", async (t) => {
+test("the bundle runs the upstream entry, or nothing; /cliproxyapi-bundle is registered either way", async (t) => {
   const s = setup(t);
   const calls: string[] = [];
-  const load = async () => [async () => { calls.push("index"); }, () => { calls.push("tps"); }];
+  const load = async () => [async () => { calls.push("index"); }];
   const base = { agentDir: s.agentDir, cwd: s.cwd, projectTrusted: false, env: {}, load };
   const bundled = fakePi();
   await createCliproxyapiBundle(base)(bundled.pi);
-  assert.deepEqual(calls, ["index", "tps"]);
-  assert.deepEqual(bundled.commands, ["cliproxyapi"]);
+  assert.deepEqual(calls, ["index"]);
+  assert.deepEqual(bundled.commands, ["cliproxyapi-bundle"]);
   assert.deepEqual(bundled.channels, ["oh-my-pi-extensions:dependencies"]);
   s.settings(s.global, [`npm:${PACKAGE_NAME}`]);
   const separate = fakePi();
   await createCliproxyapiBundle(base)(separate.pi);
-  assert.deepEqual(calls, ["index", "tps"], "nothing more when installed on its own");
-  assert.deepEqual(separate.commands, ["cliproxyapi"], "the maintenance command stays available");
+  assert.deepEqual(calls, ["index"], "nothing more when installed on its own");
+  assert.deepEqual(separate.commands, ["cliproxyapi-bundle"], "the maintenance command stays available");
   s.settings(s.global, []);
   const off = fakePi();
   await createCliproxyapiBundle({ ...base, env: { PI_CLIPROXYAPI_BUNDLED: "off" } })(off.pi);
-  assert.deepEqual(calls, ["index", "tps"], "nothing more when off");
-  assert.deepEqual(off.commands, ["cliproxyapi"]);
+  assert.deepEqual(calls, ["index"], "nothing more when off");
+  assert.deepEqual(off.commands, ["cliproxyapi-bundle"]);
   assert.deepEqual(off.channels, ["oh-my-pi-extensions:dependencies"]);
 });

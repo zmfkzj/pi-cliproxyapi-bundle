@@ -1,6 +1,6 @@
 name: Update provider
 
-# A new @router-for-me/pi-cliproxyapi-provider release on npm: update package.json + package-lock.json, install exactly
+# A new pi-cliproxyapi-provider release on npm (github.com/0xRichardH/pi-cliproxyapi-provider): update package.json + package-lock.json, install exactly
 # that lock, typecheck and run every test (the Pi loader test included), and only then commit the two files to main.
 # Any failed step fails the run and nothing is pushed. The oh-my-pi-extensions umbrella's hourly "Update submodules"
 # workflow then moves its cliproxyapi gitlink to this commit.
@@ -54,5 +54,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add package.json package-lock.json
-          git commit -m "chore: update @router-for-me/pi-cliproxyapi-provider $FROM -> $VERSION"
+          git commit -m "chore: update pi-cliproxyapi-provider $FROM -> $VERSION"
           git push

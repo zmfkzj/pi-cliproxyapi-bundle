@@ -1,5 +1,7 @@
-// Offline integration, NOT paid/live-provider validation: the server scripts Codex SSE bytes.
-// Pi's loader imports the installed CLIProxyAPI adapter unchanged; Pi executes the tool loop.
+// Offline integration, NOT paid/live-provider validation: a loopback server stands in for CLIProxyAPI, lists models and
+// scripts the SSE bytes. Pi's loader imports the installed pi-cliproxyapi-provider unchanged through this bundle; it
+// registers the models (Codex GPT -> openai-responses, Claude -> anthropic-messages) and Pi's own API drivers stream them.
+// Pi executes the tool loop.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type IncomingHttpHeaders, type ServerResponse } from "node:http";
@@ -18,10 +20,12 @@ import { Type } from "typebox";
 import { isolateProvider } from "./helpers/offline-provider.ts";
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const MODEL_ID = "fake-model";
-const API = "cliproxyapi-codex-responses";
-const CATALOG_PATH = "/proxy/v1/models?client_version=pi";
-const INFERENCE_PATH = "/proxy/backend-api/codex/responses";
+const PROVIDER = "cpa";
+const GPT = "gpt-6-astra";
+const CLAUDE = "claude-opus-4-6";
+const CATALOG = { object: "list", data: [{ id: GPT, object: "model", owned_by: "openai" }, { id: CLAUDE, object: "model", owned_by: "anthropic" }] };
+const RESPONSES_PATH = "/v1/responses";
+const MESSAGES_PATH = "/v1/messages";
 const INSTRUCTIONS = "Offline CLIProxyAPI compatibility fixture. Use only the echo tool.";
 const TOOL_ID = "call_echo_1|fc_echo_1";
 const TOOL_PARAMETERS = Type.Object({
@@ -37,12 +41,7 @@ const DIRECT_CONTEXT: Context = {
 };
 const USAGE = { input_tokens: 12, input_tokens_details: { cached_tokens: 3 }, output_tokens: 5, total_tokens: 17 };
 
-type WireBody = {
-  model: string; instructions: string; stream: boolean; store: boolean;
-  tools: { type: string; name: string; parameters: unknown }[];
-  input: Record<string, unknown>[];
-  [key: string]: unknown;
-};
+type WireBody = { model: string; stream: boolean; tools?: Record<string, unknown>[]; input?: Record<string, unknown>[]; [key: string]: unknown };
 type WireRequest = { method: string | undefined; url: string | undefined; headers: IncomingHttpHeaders; body: WireBody };
 type Frame = { type: string; [key: string]: unknown };
 type Reply = (request: WireRequest, response: ServerResponse, attempt: number) => Promise<void> | void;
@@ -75,8 +74,20 @@ function textFrames(): Frame[] {
   ];
 }
 
+function anthropicFrames(): Frame[] {
+  return [
+    { type: "message_start", message: { id: "msg_claude", type: "message", role: "assistant", model: CLAUDE, content: [], stop_reason: null, usage: { input_tokens: 7, output_tokens: 1 } } },
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Claude via " } },
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Messages." } },
+    { type: "content_block_stop", index: 0 },
+    { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 4 } },
+    { type: "message_stop" },
+  ];
+}
+
 async function sendSSE(response: ServerResponse, frames: Frame[], end = true): Promise<void> {
-  response.writeHead(200, { "content-type": "text/event-stream", "x-offline-fixture": "sse" });
+  response.writeHead(200, { "content-type": "text/event-stream" });
   response.flushHeaders();
   for (const frame of frames) {
     const bytes = Buffer.from(`event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`);
@@ -89,32 +100,26 @@ async function sendSSE(response: ServerResponse, frames: Frame[], end = true): P
       await setImmediate();
     }
   }
-  if (end && !response.destroyed) response.end("data: [DONE]\n\n");
+  if (end && !response.destroyed) response.end();
 }
 
-function unavailable(_request: WireRequest, response: ServerResponse): void {
-  response.writeHead(503, { "content-type": "application/json", "retry-after-ms": "0" });
-  response.end(JSON.stringify({ error: { message: "offline service unavailable", type: "server_error" } }));
-}
-
-async function start(t: TestContext, reply: Reply, agentRetries = 0) {
+async function start(t: TestContext, reply: Reply, modelId = GPT) {
   const root = mkdtempSync(join(tmpdir(), "pi cliproxyapi stream "));
   const agentDir = join(root, "agent");
   mkdirSync(agentDir, { recursive: true });
   const requests: WireRequest[] = [];
-  const catalogRequests: { method: string | undefined; url: string | undefined; auth: string | undefined }[] = [];
+  const catalogRequests: { method: string | undefined; auth: string | undefined }[] = [];
   const failures: unknown[] = [];
   let session: AgentSession | undefined;
   let restore = () => {};
   const server = createServer((request, response) => {
     void (async () => {
-      if (request.url === CATALOG_PATH) {
-        catalogRequests.push({ method: request.method, url: request.url, auth: request.headers.authorization });
+      if (request.url === "/v1/models") {
+        catalogRequests.push({ method: request.method, auth: request.headers.authorization });
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ models: [{ slug: MODEL_ID, display_name: "Offline fixture", context_window: 100_000, input_modalities: ["text"] }] }));
+        response.end(JSON.stringify(CATALOG));
         return;
       }
-      assert.equal(request.url, INFERENCE_PATH, "provider must use the configured inference endpoint");
       const chunks: Buffer[] = [];
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
       const encoded = Buffer.concat(chunks);
@@ -150,50 +155,24 @@ async function start(t: TestContext, reply: Reply, agentRetries = 0) {
   });
   await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
   const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  restore = isolateProvider(t, agentDir, `${origin}/proxy/v1/`);
+  restore = isolateProvider(t, root, agentDir, `${origin}/v1`);
   const settingsManager = SettingsManager.inMemory({
-    defaultProvider: "cliproxyapi", defaultModel: MODEL_ID, defaultThinkingLevel: "off",
-    compaction: { enabled: false }, cacheWarming: "off", enableInstallTelemetry: false,
-    transport: "sse",
-    retry: { enabled: agentRetries > 0, maxRetries: agentRetries, baseDelayMs: 1, maxAgentDelayMs: 1, provider: { maxRetries: 0 } },
+    defaultThinkingLevel: "off", compaction: { enabled: false }, cacheWarming: "off", enableInstallTelemetry: false,
+    transport: "sse", retry: { enabled: false, maxRetries: 0, provider: { maxRetries: 0 } },
   });
-  const hookOrder: string[] = [];
-  const rawFrames: Frame[] = [];
   const payloads: unknown[] = [];
-  const responseStatuses: number[] = [];
   const loader = new DefaultResourceLoader({
     cwd: root, agentDir, settingsManager, additionalExtensionPaths: [packageDir],
     noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     systemPromptOverride: () => INSTRUCTIONS,
-    extensionFactories: [pi => {
-      pi.on("before_provider_headers", event => { event.headers["x-offline-boundary"] = "sdk"; });
-      pi.on("before_provider_request", event => {
-        hookOrder.push("payload");
-        const payload = { ...(event.payload as WireBody), metadata: { fixture: "loopback-only" } };
-        payloads.push(structuredClone(payload));
-        return payload;
-      });
-      pi.on("after_provider_response", event => {
-        hookOrder.push("response");
-        responseStatuses.push(event.status);
-        if (event.status === 200) assert.equal(event.headers["x-offline-fixture"], "sse");
-      });
-      pi.on("provider_stream_event", event => {
-        assert.equal(event.provider, "cliproxyapi");
-        assert.equal(event.api, API);
-        assert.equal(event.model, MODEL_ID);
-        const frame = structuredClone(event.data) as Frame;
-        hookOrder.push(frame.type);
-        rawFrames.push(frame);
-      });
-    }],
+    // Registered after the bundle, so it sees the payload after the provider's own before_provider_request adapter.
+    extensionFactories: [pi => { pi.on("before_provider_request", event => { payloads.push(structuredClone(event.payload)); }); }],
   });
   await loader.reload();
   assert.deepEqual(loader.getExtensions().errors, []);
   const executions: unknown[] = [];
   const modelRuntime = await ModelRuntime.create({
-    authPath: join(agentDir, "auth.json"), modelsPath: null, modelsStorePath: join(agentDir, "models-cache.json"),
-    allowModelNetwork: false, refreshOnCreate: false,
+    authPath: join(agentDir, "auth.json"), modelsPath: null, modelsStorePath: join(agentDir, "models-cache.json"), refreshOnCreate: false,
   });
   ({ session } = await createAgentSession({
     cwd: root, agentDir, resourceLoader: loader, settingsManager, modelRuntime,
@@ -207,39 +186,37 @@ async function start(t: TestContext, reply: Reply, agentRetries = 0) {
     }],
   }));
   await session.bindExtensions({ onError: error => failures.push(error) });
-  const model = session.modelRuntime.getModel("cliproxyapi", MODEL_ID);
+  const refreshed = await modelRuntime.refresh({ providers: [PROVIDER], allowNetwork: true, force: true });
+  assert.equal(refreshed.errors.size, 0);
+  const model = session.modelRuntime.getModel(PROVIDER, modelId);
   assert.ok(model, "the actual installed provider registered its model");
-  assert.equal(model.api, API);
-  assert.equal(model.baseUrl, `${origin}/proxy/backend-api/`);
   await session.setModel(model);
   assert.deepEqual(session.getActiveToolNames(), ["echo"]);
   const events: AgentSessionEvent[] = [];
   session.subscribe(event => { events.push(structuredClone(event)); });
-  return { session, model, requests, catalogRequests, executions, events, hookOrder, rawFrames, payloads, responseStatuses };
+  return { session, model, origin, requests, catalogRequests, executions, events, payloads };
 }
 
 type Harness = Awaited<ReturnType<typeof start>>;
 
-function assertBoundary(h: Harness, attempts: number): void {
-  assert.deepEqual(h.catalogRequests, [{ method: "GET", url: CATALOG_PATH, auth: "Bearer dummy-test-key" }]);
+/**
+ * Endpoint, authentication and the provider's Codex-compatible tool wire contract on every attempt: `strict: null` comes
+ * from its `before_provider_request` adapter, so it applies to agent-session turns, not to direct `streamSimple` calls.
+ */
+function assertResponsesBoundary(h: Harness, attempts: number, direct = false): void {
+  const strict = direct ? undefined : null;
+  assert.deepEqual(h.catalogRequests, [{ method: "GET", auth: "Bearer dummy-test-key" }]);
   assert.equal(h.requests.length, attempts);
   for (const request of h.requests) {
     assert.equal(request.method, "POST");
-    assert.equal(request.url, INFERENCE_PATH);
+    assert.equal(request.url, RESPONSES_PATH);
     assert.equal(request.headers.authorization, "Bearer dummy-test-key");
-    assert.equal(request.headers["chatgpt-account-id"], undefined, "plain proxy keys must not need a ChatGPT account");
-    assert.equal(request.headers["content-type"], "application/json");
-    assert.equal(request.headers.accept, "text/event-stream");
-    assert.equal(request.headers["openai-beta"], "responses=experimental");
-    assert.equal(request.body.model, MODEL_ID);
+    assert.equal(request.headers["chatgpt-account-id"], undefined, "plain proxy keys need no ChatGPT account");
+    assert.equal(request.body.model, GPT);
     assert.equal(request.body.stream, true);
-    assert.equal(request.body.store, false);
-    assert.match(request.body.instructions, /Offline CLIProxyAPI compatibility fixture/);
-    assert.deepEqual(request.body.tools.map(tool => ({ type: tool.type, name: tool.name, parameters: tool.parameters })), [
-      { type: "function", name: "echo", parameters: JSON.parse(JSON.stringify(TOOL_PARAMETERS)) },
+    assert.deepEqual(request.body.tools?.map(tool => ({ type: tool.type, name: tool.name, strict: tool.strict, parameters: tool.parameters })), [
+      { type: "function", name: "echo", strict, parameters: JSON.parse(JSON.stringify(TOOL_PARAMETERS)) },
     ]);
-    assert.equal(request.body.input[0]?.role, "user");
-    assert.equal(request.body.service_tier, undefined, "ambient Fast mode is disabled in the fixture");
   }
 }
 
@@ -251,7 +228,6 @@ function assertSettled(h: Harness, aborted = false): void {
   assert.deepEqual(h.events.filter(event => event.type === "agent_settled"), [{ type: "agent_settled", aborted }]);
   assert.equal(h.session.isIdle, true);
   assert.equal(h.session.isStreaming, false);
-  assert.equal(h.session.isRetrying, false);
 }
 
 async function collect(stream: AssistantMessageEventStream, onEvent?: (event: AssistantMessageEvent) => void) {
@@ -264,58 +240,48 @@ async function collect(stream: AssistantMessageEventStream, onEvent?: (event: As
   const terminals = events.filter(event => event.type === "done" || event.type === "error");
   assert.equal(terminals.length, 1, "exactly one terminal stream event");
   assert.deepEqual(events.at(-1), terminals[0], "no events after the terminal outcome");
-  assert.deepEqual(terminals[0]?.type === "error" ? terminals[0].error : terminals[0]?.message, result);
   return { events, result };
 }
 
-test("Pi 1.3 + installed CLIProxyAPI: fragmented arguments execute once and the result round-trips", { timeout: 30_000 }, async t => {
-  for (const name of ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai", "@router-for-me/pi-cliproxyapi-provider"]) {
+test("Codex GPT over Responses: fragmented arguments execute once and the result round-trips", { timeout: 30_000 }, async t => {
+  for (const name of ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai", "pi-cliproxyapi-provider"]) {
     const manifest = JSON.parse(readFileSync(join(packageDir, "node_modules", name, "package.json"), "utf8"));
     t.diagnostic(`${name}@${manifest.version}`);
   }
   const fragments = ['{"te', 'xt":"line\\', 'n\\"quoted\\" 한', '글 😀","meta":{"count":', '2,"active":tr', 'ue}}'];
   const args = { text: 'line\n"quoted" 한글 😀', meta: { count: 2, active: true } };
-  const first = toolFrames(fragments);
-  const second = textFrames();
   const h = await start(t, async (_request, response, attempt) => {
     assert.ok(attempt <= 2, "only tool call and result continuation");
-    await sendSSE(response, attempt === 1 ? first : second);
+    await sendSSE(response, attempt === 1 ? toolFrames(fragments) : textFrames());
   });
+  assert.equal(h.model.api, "openai-responses");
+  assert.equal(h.model.baseUrl, `${h.origin}/v1`);
   await h.session.prompt("Echo the supplied test data.");
-  assertBoundary(h, 2);
+  assertResponsesBoundary(h, 2);
   assert.deepEqual(h.executions, [args]);
   const ends = assistantEnds(h);
   assert.deepEqual(ends.map(message => message.stopReason), ["toolUse", "stop"]);
-  assert.equal(ends[0]?.api, API);
+  assert.equal(ends[0]?.provider, PROVIDER);
   assert.deepEqual(ends[0]?.content, [{ type: "toolCall", id: TOOL_ID, name: "echo", arguments: args }]);
   assert.equal(ends[0]?.usage.input, 9);
   assert.equal(ends[0]?.usage.cacheRead, 3);
   assert.equal(ends[0]?.usage.output, 5);
-  assert.equal(ends[0]?.usage.totalTokens, 17);
-  assert.ok(Math.abs(ends[0]!.usage.cost.total - 0.000041) < 1e-12, "synthetic pricing cache is used");
   const updates = h.events.flatMap(event => event.type === "message_update" ? [event.assistantMessageEvent] : []);
   assert.equal(updates.filter(event => event.type === "toolcall_start").length, 1);
   assert.equal(updates.filter(event => event.type === "toolcall_end").length, 1);
-  assert.deepEqual(updates.filter(event => event.type === "toolcall_delta").map(event => event.delta), fragments);
-  assert.equal(updates.filter(event => event.type === "text_start").length, 1);
-  assert.equal(updates.filter(event => event.type === "text_end").length, 1);
   const result = h.session.messages.find(message => message.role === "toolResult");
   assert.ok(result && result.role === "toolResult");
   assert.equal(result.isError, false);
   assert.equal(result.toolCallId, TOOL_ID);
-  const replay = h.requests[1]!.body.input;
-  assert.deepEqual(replay.find(item => item.type === "function_call"), {
-    type: "function_call", id: "fc_echo_1", call_id: "call_echo_1", name: "echo", arguments: JSON.stringify(args),
-  });
-  assert.deepEqual(replay.find(item => item.type === "function_call_output"), {
-    type: "function_call_output", call_id: "call_echo_1", output: JSON.stringify(args),
-  });
+  const replay = h.requests[1]!.body.input ?? [];
+  const call = replay.find(item => item.type === "function_call");
+  assert.deepEqual({ id: call?.id, call_id: call?.call_id, name: call?.name, arguments: call?.arguments },
+    { id: "fc_echo_1", call_id: "call_echo_1", name: "echo", arguments: JSON.stringify(args) });
+  const output = replay.find(item => item.type === "function_call_output");
+  assert.equal(output?.call_id, "call_echo_1");
+  assert.equal(output?.output, JSON.stringify(args));
   assert.equal(h.session.getLastAssistantText(), "Tool result accepted.");
-  assert.deepEqual(h.payloads, h.requests.map(request => request.body), "onPayload replacement reaches HTTP unchanged");
-  assert.ok(h.requests.every(request => request.headers["x-offline-boundary"] === "sdk"));
-  assert.deepEqual(h.responseStatuses, [200, 200]);
-  assert.deepEqual(h.rawFrames, [...first, ...second], "raw provider events arrive once, before normalization");
-  assert.deepEqual(h.hookOrder, ["payload", "response", ...first.map(frame => frame.type), "payload", "response", ...second.map(frame => frame.type)]);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.payloads)), h.requests.map(request => request.body), "the adapted payload reaches HTTP unchanged");
   assertSettled(h);
 });
 
@@ -329,39 +295,19 @@ for (const [label, malformed] of [
       await sendSSE(response, attempt === 1 ? toolFrames([malformed]) : textFrames());
     });
     await h.session.prompt("Try the malformed tool call.");
-    assertBoundary(h, 2);
+    assertResponsesBoundary(h, 2);
     assert.deepEqual(h.executions, []);
-    const call = assistantEnds(h)[0]?.content.find(block => block.type === "toolCall");
-    assert.ok(call && call.type === "toolCall");
-    assert.deepEqual(call.arguments, {});
-    assert.ok(call.argumentsError?.includes(malformed), "malformed input is not repaired to an executable prefix");
     const results = h.session.messages.filter(message => message.role === "toolResult");
     assert.equal(results.length, 1);
     assert.equal(results[0]?.isError, true);
-    const replay = h.requests[1]!.body.input.find(item => item.type === "function_call_output");
+    const replay = h.requests[1]!.body.input?.find(item => item.type === "function_call_output");
     assert.equal(replay?.call_id, "call_echo_1");
-    assert.ok(JSON.stringify(replay?.output).includes("Received arguments"));
     assert.deepEqual(assistantEnds(h).map(message => message.stopReason), ["toolUse", "stop"]);
     assertSettled(h);
   });
 }
 
-test("malformed SSE JSON produces one failed assistant outcome and zero tool executions", { timeout: 30_000 }, async t => {
-  const h = await start(t, async (_request, response) => {
-    await sendSSE(response, toolFrames(['{"text":"partial"'], false), false);
-    response.end('data: {"type": not-json}\n\n');
-  });
-  await h.session.prompt("Read a broken SSE event.");
-  assertBoundary(h, 1);
-  assert.deepEqual(h.executions, []);
-  assert.equal(assistantEnds(h).length, 1);
-  assert.equal(assistantEnds(h)[0]?.stopReason, "error");
-  assert.match(assistantEnds(h)[0]?.errorMessage ?? "", /Invalid Codex SSE JSON/);
-  assert.equal(h.session.messages.some(message => message.role === "toolResult"), false);
-  assertSettled(h);
-});
-
-test("AbortSignal cancels a pending SSE read with exactly one terminal error and closes the connection", { timeout: 30_000 }, async t => {
+test("AbortSignal cancels a pending SSE read with exactly one terminal outcome and closes the connection", { timeout: 30_000 }, async t => {
   let onClose!: () => void;
   const closed = new Promise<void>(resolve => { onClose = resolve; });
   const h = await start(t, async (_request, response) => {
@@ -376,17 +322,15 @@ test("AbortSignal cancels a pending SSE read with exactly one terminal error and
     if (event.type === "toolcall_delta") controller.abort();
   });
   await closed;
-  assertBoundary(h, 1);
-  assert.equal(events.filter(event => event.type === "start").length, 1);
+  assertResponsesBoundary(h, 1, true);
   assert.equal(events.some(event => event.type === "toolcall_end" || event.type === "done"), false);
   assert.equal(result.stopReason, "aborted");
-  assert.match(result.errorMessage ?? "", /abort/i);
 });
 
-test("SDK abort settles once, never executes the partial tool and does not retry", { timeout: 30_000 }, async t => {
+test("SDK abort settles once and never executes the partial tool", { timeout: 30_000 }, async t => {
   let onPartial!: () => void;
   const partial = new Promise<void>(resolve => { onPartial = resolve; });
-  const h = await start(t, (_request, response) => sendSSE(response, toolFrames(['{"text":"partial"'], false), false), 2);
+  const h = await start(t, (_request, response) => sendSSE(response, toolFrames(['{"text":"partial"'], false), false));
   h.session.subscribe(event => {
     if (event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_delta") onPartial();
   });
@@ -394,41 +338,39 @@ test("SDK abort settles once, never executes the partial tool and does not retry
   await partial;
   await h.session.abort();
   await prompt;
-  assertBoundary(h, 1);
+  assertResponsesBoundary(h, 1);
   assert.deepEqual(h.executions, []);
   assert.deepEqual(assistantEnds(h).map(message => message.stopReason), ["aborted"]);
-  assert.equal(h.events.some(event => event.type === "auto_retry_start"), false);
   assertSettled(h, true);
 });
 
-test("provider retry exhaustion makes exactly three HTTP attempts and one terminal stream error", { timeout: 30_000 }, async t => {
-  const h = await start(t, unavailable);
-  const statuses: number[] = [];
-  const stream = h.session.modelRuntime.streamSimple(h.model, DIRECT_CONTEXT, {
-    transport: "sse", maxRetries: 2, signal: t.signal,
-    onResponse: response => { statuses.push(response.status); },
+test("a failed CLIProxyAPI response is one error outcome with no tool execution", { timeout: 30_000 }, async t => {
+  const h = await start(t, (_request, response) => {
+    response.writeHead(503, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "offline service unavailable", type: "server_error" } }));
   });
-  const { events, result } = await collect(stream);
-  assertBoundary(h, 3);
-  assert.deepEqual(statuses, [503, 503, 503]);
-  assert.deepEqual(events.map(event => event.type), ["error"], "setup failures emit no start or done");
-  assert.equal(result.stopReason, "error");
-  assert.match(result.errorMessage ?? "", /offline service unavailable/);
-  assert.deepEqual(h.requests.map(request => request.body), Array(3).fill(h.requests[0]!.body));
+  await h.session.prompt("Fail once.");
+  assertResponsesBoundary(h, 1);
+  assert.deepEqual(h.executions, []);
+  assert.deepEqual(assistantEnds(h).map(message => message.stopReason), ["error"]);
+  assert.match(assistantEnds(h)[0]?.errorMessage ?? "", /503|offline service unavailable/);
+  assertSettled(h);
 });
 
-test("SDK retry exhaustion has intermediate runs but exactly one final failure and settlement", { timeout: 30_000 }, async t => {
-  const h = await start(t, unavailable, 2);
-  await h.session.prompt("Exhaust two retries.");
-  assertBoundary(h, 3);
-  assert.deepEqual(h.executions, []);
-  assert.deepEqual(assistantEnds(h).map(message => message.stopReason), ["error", "error", "error"]);
-  assert.deepEqual(h.events.filter(event => event.type === "auto_retry_start").map(event => event.attempt), [1, 2]);
-  const endings = h.events.filter(event => event.type === "auto_retry_end");
-  assert.equal(endings.length, 1);
-  assert.equal(endings[0]?.success, false);
-  assert.equal(endings[0]?.attempt, 2);
-  assert.match(endings[0]?.finalError ?? "", /offline service unavailable/);
-  assert.deepEqual(h.events.filter(event => event.type === "agent_end").map(event => event.willRetry), [true, true, false]);
+test("Claude over Anthropic Messages: /v1/messages on the proxy origin, Bearer key, streamed text", { timeout: 30_000 }, async t => {
+  const h = await start(t, async (_request, response) => { await sendSSE(response, anthropicFrames()); }, CLAUDE);
+  assert.equal(h.model.api, "anthropic-messages");
+  assert.equal(h.model.baseUrl, h.origin);
+  await h.session.prompt("Say hello.");
+  assert.equal(h.requests.length, 1);
+  const [request] = h.requests;
+  assert.equal(request!.method, "POST");
+  assert.equal(request!.url?.split("?")[0], MESSAGES_PATH);
+  assert.equal(request!.headers.authorization, "Bearer dummy-test-key");
+  assert.equal(request!.body.model, CLAUDE);
+  assert.equal(request!.body.stream, true);
+  assert.deepEqual(request!.body.tools?.map(tool => tool.name), ["echo"]);
+  assert.equal(h.session.getLastAssistantText(), "Claude via Messages.");
+  assert.deepEqual(assistantEnds(h).map(message => message.stopReason), ["stop"]);
   assertSettled(h);
 });

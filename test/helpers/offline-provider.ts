@@ -1,36 +1,31 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
 
-/** Isolate the real provider's configuration; never substitute its stream or HTTP response. */
-export function isolateProvider(t: TestContext, agentDir: string, baseUrl: string, bundled = "on"): () => void {
+/**
+ * Isolate the real provider's configuration; never substitute its stream or HTTP response.
+ * pi-cliproxyapi-provider reads `~/.pi/agent/pi-cliproxyapi-provider/config.json` and keeps its snapshots under
+ * `~/.cache/pi-cliproxyapi-provider/` relative to the home directory (not PI_CODING_AGENT_DIR), so HOME moves to `home`
+ * too; every CLIPROXYAPI_* variable of the caller is removed first. Startup never fetches models.dev: metadata comes from
+ * the package's bundled fallback catalog.
+ */
+export function isolateProvider(t: TestContext, home: string, agentDir: string, baseUrl: string, bundled = "on"): () => void {
   const env: NodeJS.ProcessEnv = {
+    HOME: home,
     PI_CODING_AGENT_DIR: agentDir,
     PI_CLIPROXYAPI_BUNDLED: bundled,
     CLIPROXYAPI_BASE_URL: baseUrl,
     CLIPROXYAPI_API_KEY: "dummy-test-key",
-    CLIPROXYAPI_PROVIDER_ID: "cliproxyapi",
-    CLIPROXYAPI_PROVIDER_NAME: "CLIProxyAPI",
-    CLIPROXYAPI_FAST: "off",
-    CLIPROXYAPI_TRANSPORT: "sse",
     HTTP_PROXY: "", HTTPS_PROXY: "", ALL_PROXY: "",
     http_proxy: "", https_proxy: "", all_proxy: "",
     NO_PROXY: "*", no_proxy: "*",
-    // The provider's patched Codex module cache lives under tmpdir(); keep these tests off the user's cache directory.
-    // Concurrent starts on one shared cache directory are covered by test/codex-cache.test.ts.
-    TMPDIR: join(agentDir, "tmp"),
   };
-  const saved = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+  const names = [...new Set([...Object.keys(env), ...Object.keys(process.env).filter(name => name.startsWith("CLIPROXYAPI_"))])];
+  const saved = Object.fromEntries(names.map(key => [key, process.env[key]]));
+  for (const name of names) delete process.env[name];
   Object.assign(process.env, env);
-
-  // Upstream otherwise fetches models.dev while loading, even with a loopback model catalog.
-  // Seed its on-disk cache with synthetic pricing, not a live catalog or credentials.
-  mkdirSync(join(agentDir, "tmp"), { recursive: true });
-  writeFileSync(join(agentDir, "tmp", "models-dev-cache.json"), JSON.stringify({
-    timestamp: Date.now(),
-    providers: { openai: { models: { "fake-model": { cost: { input: 2, output: 4, cache_read: 1, cache_write: 3 } } } } },
-  }));
+  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
 
   const origin = new URL(baseUrl).origin;
   assert.equal(new URL(baseUrl).hostname, "127.0.0.1");

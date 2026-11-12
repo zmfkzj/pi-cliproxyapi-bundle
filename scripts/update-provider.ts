@@ -1,5 +1,6 @@
 /**
- * Detect a new release of the official provider and move this package to it: `npm view` the `latest` version, compare it
+ * Detect a new npm release of the provider (pi-cliproxyapi-provider, github.com/0xRichardH/pi-cliproxyapi-provider) and
+ * move this package to it: `npm view` the `latest` version, compare it
  * with the version package-lock.json actually installs (a caret range alone would hide a new minor), and when it is newer
  * run `npm install <pkg>@^<latest>`, which updates package.json and package-lock.json together. The compatibility checks
  * (typecheck, tests) and the commit are the workflow's next steps (.github/workflows/update-provider.yml); this script
@@ -13,10 +14,10 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const PROVIDER = "@router-for-me/pi-cliproxyapi-provider";
+export const PROVIDER = "pi-cliproxyapi-provider";
 const LOCK_KEY = `node_modules/${PROVIDER}`;
 
-/** Release versions only (`1.4.22`); a prerelease or anything else is rejected. */
+/** Release versions only (`0.16.10`); a prerelease or anything else is rejected. */
 export function parseVersion(text: string): [number, number, number] {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(text.trim());
   if (!match) throw new Error(`not a release version: ${JSON.stringify(text)}`);

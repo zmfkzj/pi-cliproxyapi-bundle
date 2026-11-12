@@ -2,7 +2,7 @@
   "name": "pi-cliproxyapi-bundle",
   "version": "0.1.0",
   "private": true,
-  "description": "Bundles the official CLIProxyAPI provider (@router-for-me/pi-cliproxyapi-provider) into oh-my-pi-extensions, without loading it twice",
+  "description": "Bundles the CLIProxyAPI provider pi-cliproxyapi-provider (github.com/0xRichardH/pi-cliproxyapi-provider) into oh-my-pi-extensions, without loading it twice",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -23,7 +23,7 @@
     "test": "node --test 'test/**/*.test.ts'"
   },
   "dependencies": {
-    "@router-for-me/pi-cliproxyapi-provider": "^1.4.25"
+    "pi-cliproxyapi-provider": "^0.16.10"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

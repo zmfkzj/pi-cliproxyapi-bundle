@@ -1,13 +1,16 @@
-// `/cliproxyapi doctor|install-deps` and the umbrella's dependency provider (see dependencies.ts for the contract).
+// `/cliproxyapi-bundle doctor|install-deps` and the umbrella's dependency provider (see dependencies.ts for the contract).
 // Registered before the bundle decides whether to load the upstream provider, so it exists in every mode (bundled,
-// separate install, PI_CLIPROXYAPI_BUNDLED=off) without loading the provider twice.
+// separate install, PI_CLIPROXYAPI_BUNDLED=off) without loading the provider twice. Not `/cliproxyapi`: the upstream
+// provider registers that name itself, and Pi would rename both to `/cliproxyapi:1` and `/cliproxyapi:2`.
 //
 // check() is read-only. It resolves the CLIProxyAPI connection the way the upstream provider does
-// (extensions/lib.ts resolveConnection/resolveEndpoints in @router-for-me/pi-cliproxyapi-provider: env >
-// cliproxyapi.json > auth.json login > http://127.0.0.1:8317, models at {root}/v1/models?client_version=pi) without
-// importing it (the bundled copy may be missing), and sends at most one short GET to that models endpoint.
-// Keys are reported as set / not set and never printed.
+// (src/config.ts loadConfig and src/registration.ts in pi-cliproxyapi-provider: env > ~/.pi/agent/pi-cliproxyapi-provider/
+// config.json (under the home directory, not PI_CODING_AGENT_DIR) > defaults; models at `<baseUrl>/models`; key from a
+// stored `/login <provider>` API key, then config `apiKey`, then CLIPROXYAPI_API_KEY) without importing it (the bundled
+// copy may be missing), and sends at most one short GET to that models endpoint. Keys are reported as set / not set and
+// never printed; `!command` keys are never run.
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -18,11 +21,12 @@ import {
 
 export const CLIPROXYAPI_DEPENDENCY_ID = "cliproxyapi";
 export const CLIPROXYAPI_LABEL = "pi-cliproxyapi-bundle";
-export const CLIPROXYAPI_COMMAND = "cliproxyapi";
-export const UPSTREAM_PACKAGE = "@router-for-me/pi-cliproxyapi-provider";
-export const DEFAULT_BASE_URL = "http://127.0.0.1:8317";
+export const CLIPROXYAPI_COMMAND = "cliproxyapi-bundle";
+export const UPSTREAM_PACKAGE = "pi-cliproxyapi-provider";
+export const DEFAULT_PROVIDER_NAME = "cpa";
+export const DEFAULT_BASE_URL = "http://localhost:8317/v1";
 export const PROBE_TIMEOUT_MS = 3_000;
-export const CLIPROXYAPI_USAGE = "Usage: /cliproxyapi doctor (check the provider, CLIProxyAPI server and API key) | /cliproxyapi install-deps";
+export const CLIPROXYAPI_USAGE = "Usage: /cliproxyapi-bundle doctor (check the provider, CLIProxyAPI server and API key) | /cliproxyapi-bundle install-deps";
 /** This package's directory (src/..). */
 export const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
 const SUBCOMMANDS = [
@@ -36,16 +40,16 @@ export interface BundleState {
   /** Whether the bundled upstream entries finished loading. */
   loaded?: boolean;
   loadError?: string;
-  /** Why the provider's patched Codex module could not be protected; its Codex streaming is refused (src/codex-cache.ts). */
-  codexModuleError?: string;
   /** The settings files that install the upstream package on its own (computed on demand). */
   separateInstalls?: () => string[];
 }
 
 export interface CliproxyapiDoctorOptions {
   packageDir?: string;
-  /** Pi agent directory. Default: getAgentDir() at check time. */
+  /** Pi agent directory (auth.json). Default: getAgentDir() at check time. */
   agentDir?: string;
+  /** Home directory of the provider's global config (`<home>/.pi/agent/pi-cliproxyapi-provider/config.json`). Default: os.homedir(). */
+  homeDir?: string;
   env?: NodeJS.ProcessEnv;
   fetch?: typeof globalThis.fetch;
   /** Probe timeout. Default: PROBE_TIMEOUT_MS. */
@@ -100,60 +104,77 @@ function readJsonObject(path: string): { value: Record<string, unknown>; invalid
 }
 
 export interface ConnectionSettings {
-  providerId: string;
   providerName: string;
+  providerNameSource: string;
   configPath: string;
   configInvalid: boolean;
   baseUrlSource: string;
   /** Origin and models URL; undefined when the base URL is not a valid URL. */
   origin?: string;
   modelsUrl?: string;
+  authRequired: boolean;
+  /** A literal key that the probe may send (never a `!command`). */
   apiKey?: string;
   apiKeySource?: string;
+  /** auth.json holds an OAuth-type entry for the provider name (the former provider's `/login`), which this provider cannot use. */
+  oauthEntry?: boolean;
+  /** The former provider's `<agentDir>/cliproxyapi.json`, when it exists and the new config does not. */
+  legacyConfig?: { path: string; providerId: string; baseUrl: string };
+}
+
+function parseBoolean(value: string | undefined): boolean | undefined {
+  const text = value?.trim().toLowerCase();
+  if (text === undefined) return undefined;
+  if (["1", "true", "yes", "on"].includes(text)) return true;
+  if (["0", "false", "no", "off"].includes(text)) return false;
+  return undefined;
 }
 
 /** The upstream provider's connection resolution (read-only). */
-export function resolveConnectionSettings(agentDir: string, env: NodeJS.ProcessEnv): ConnectionSettings {
-  const configPath = join(agentDir, "cliproxyapi.json");
+export function resolveConnectionSettings(agentDir: string, env: NodeJS.ProcessEnv, homeDir: string = homedir()): ConnectionSettings {
+  const configPath = join(homeDir, ".pi", "agent", "pi-cliproxyapi-provider", "config.json");
   const config = readJsonObject(configPath);
   const file = config.value;
-  const providerId = firstNonEmpty(env.CLIPROXYAPI_PROVIDER_ID, file.providerId) ?? "cliproxyapi";
-  const providerName = firstNonEmpty(env.CLIPROXYAPI_PROVIDER_NAME, file.providerName) ?? "CLIProxyAPI";
-  const entry = readJsonObject(join(agentDir, "auth.json")).value[providerId] as Record<string, unknown> | undefined;
-  let authKey: string | undefined;
-  let authBaseUrl: string | undefined;
-  if (entry?.type === "oauth" && firstNonEmpty(entry.access)) {
-    authKey = firstNonEmpty(entry.access);
-    try {
-      const meta = typeof entry.refresh === "string" && entry.refresh.trim() ? JSON.parse(entry.refresh) as { baseUrl?: unknown } : undefined;
-      authBaseUrl = firstNonEmpty(meta?.baseUrl);
-    } catch { /* Older / non-JSON refresh tokens carry no URL. */ }
-  } else if (entry?.type === "api_key" && firstNonEmpty(entry.key)) {
-    authKey = firstNonEmpty(entry.key);
-  }
   const pick = (candidates: [unknown, string][]): [string, string] | undefined => {
     for (const [value, source] of candidates) { const text = firstNonEmpty(value); if (text) return [text, source]; }
     return undefined;
   };
-  const [baseUrl, baseUrlSource] = pick([[env.CLIPROXYAPI_BASE_URL, "CLIPROXYAPI_BASE_URL"], [file.baseUrl, "cliproxyapi.json baseUrl"],
-    [authBaseUrl, `auth.json ${providerId} login`], [DEFAULT_BASE_URL, "default"]])!;
-  const key = pick([[env.CLIPROXYAPI_API_KEY, "CLIPROXYAPI_API_KEY"], [file.apiKey, "cliproxyapi.json apiKey"],
-    [authKey, entry?.type === "oauth" ? `auth.json ${providerId} login` : `auth.json ${providerId} API key`]]);
-  const settings: ConnectionSettings = { providerId, providerName, configPath, configInvalid: config.invalid, baseUrlSource,
-    apiKey: key?.[0], apiKeySource: key?.[1] };
+  const [providerName, providerNameSource] = pick([[env.CLIPROXYAPI_PROVIDER_NAME, "CLIPROXYAPI_PROVIDER_NAME"],
+    [file.providerName, "config.json providerName"], [DEFAULT_PROVIDER_NAME, "default"]])!;
+  const [baseUrl, baseUrlSource] = pick([[env.CLIPROXYAPI_BASE_URL, "CLIPROXYAPI_BASE_URL"], [file.baseUrl, "config.json baseUrl"],
+    [DEFAULT_BASE_URL, "default"]])!;
+  const authRequired = parseBoolean(env.CLIPROXYAPI_AUTH_REQUIRED) ?? (typeof file.authRequired === "boolean" ? file.authRequired : true);
+  const entry = readJsonObject(join(agentDir, "auth.json")).value[providerName] as Record<string, unknown> | undefined;
+  // Pi's order: a stored `/login` API key, then the provider's `apiKey` (config `apiKey`, else `$CLIPROXYAPI_API_KEY`).
+  const stored = entry?.type === "api_key" ? firstNonEmpty(entry.key) : undefined;
+  const configKey = firstNonEmpty(file.apiKey);
+  const key = stored ? [stored, `auth.json ${providerName} login`]
+    : configKey ? [configKey, configKey.startsWith("!") ? "config.json apiKey command, not run here" : "config.json apiKey"]
+    : pick([[env.CLIPROXYAPI_API_KEY, "CLIPROXYAPI_API_KEY"]]);
+  const settings: ConnectionSettings = { providerName, providerNameSource, configPath, configInvalid: config.invalid, baseUrlSource, authRequired,
+    apiKey: key && !key[0].startsWith("!") ? key[0] : undefined, apiKeySource: key?.[1], oauthEntry: entry?.type === "oauth" };
+  const legacyPath = join(agentDir, "cliproxyapi.json");
+  if (!existsSync(configPath) && existsSync(legacyPath)) {
+    const legacy = readJsonObject(legacyPath).value;
+    settings.legacyConfig = { path: legacyPath, providerId: firstNonEmpty(legacy.providerId) ?? "cliproxyapi",
+      baseUrl: firstNonEmpty(legacy.baseUrl) ?? "http://127.0.0.1:8317" };
+  }
   try {
-    const url = new URL(/^https?:\/\//i.test(baseUrl) ? baseUrl : `http://${baseUrl}`);
+    const url = new URL(baseUrl);
     if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("unsupported scheme");
-    let path = url.pathname.replace(/\/+$/, "");
-    if (path === "/v1") path = "/backend-api";
-    else if (path.endsWith("/v1")) path = `${path.slice(0, -"/v1".length)}/backend-api`;
-    else if (path === "" || path === "/") path = "/backend-api";
-    else if (!path.endsWith("/backend-api")) path = `${path}/backend-api`;
-    const rootPath = path.replace(/\/backend-api$/, "");
     settings.origin = url.origin;
-    settings.modelsUrl = `${url.origin}${`${rootPath}/v1/models`.replace(/\/{2,}/g, "/")}?client_version=pi`;
+    settings.modelsUrl = `${baseUrl.replace(/\/+$/, "")}/models`;
   } catch { /* reported as an invalid base URL */ }
   return settings;
+}
+
+/** The former provider's base URL (an origin, `/v1` optional) as the `/v1` base URL this provider expects. */
+function legacyBaseUrl(value: string): string {
+  try {
+    const url = new URL(/^https?:\/\//i.test(value) ? value : `http://${value}`);
+    const path = url.pathname.replace(/\/+$/, "").replace(/\/backend-api$/, "").replace(/\/v1$/, "");
+    return `${url.origin}${path}/v1`;
+  } catch { return DEFAULT_BASE_URL; }
 }
 
 /** Directory of `name` as Node resolves it from `packageDir` (its node_modules or a parent's). */
@@ -184,11 +205,7 @@ function providerItem(state: BundleState | undefined, env: NodeJS.ProcessEnv): D
     }
     if (state?.loadError) {
       return { name, status: "error", detail: `the bundled copy failed to load: ${state.loadError}`,
-        action: "Run /cliproxyapi install-deps, then /reload" };
-    }
-    if (state?.codexModuleError) {
-      return { name, status: "error", detail: `bundled copy loaded, but its Codex streaming is disabled: ${state.codexModuleError}`,
-        action: "Run /cliproxyapi install-deps, then /reload (a provider update that changed its Codex patching needs a bundle update)" };
+        action: "Run /cliproxyapi-bundle install-deps, then /reload" };
     }
     return { name, status: "ok", detail: `bundled copy ${state?.loaded ? "loaded" : "selected"} (${decision.reason})` };
   }
@@ -209,7 +226,7 @@ function npmItem(packageDir: string, bundleActive: boolean): DependencyItem {
     ? "Reinstall the package with pi update --extensions (or pi install), then /reload"
     : `Run: cd ${packageDir} && npm ci --legacy-peer-deps (installs the locked version), then /reload`;
   if (!dir) {
-    const action = "Run /cliproxyapi install-deps, then /reload";
+    const action = "Run /cliproxyapi-bundle install-deps, then /reload";
     return bundleActive
       ? { name, status: "error", detail: "the bundled copy is not installed", action }
       : { name, status: "warn", optional: true, detail: "the bundled copy is not installed (not used while it is not loaded)", action };
@@ -232,30 +249,46 @@ export async function checkCliproxyapi(options: CliproxyapiDoctorOptions = {}): 
   if (provider) items.push(provider);
   items.push(npmItem(packageDir, options.state?.decision?.load ?? true));
 
-  const settings = resolveConnectionSettings(agentDir, env);
-  const keyAction = `Run /login ${settings.providerName}, or set CLIPROXYAPI_API_KEY, or apiKey in ${settings.configPath}`;
-  const urlAction = `Set CLIPROXYAPI_BASE_URL or baseUrl in ${settings.configPath} to the CLIProxyAPI address (e.g. ${DEFAULT_BASE_URL}), or run /login ${settings.providerName}`;
+  const settings = resolveConnectionSettings(agentDir, env, options.homeDir);
+  const name = settings.providerName;
+  const keyAction = `Run /login ${name} (API key), or set apiKey in ${settings.configPath}, or CLIPROXYAPI_API_KEY`;
+  const urlAction = `Set CLIPROXYAPI_BASE_URL or baseUrl in ${settings.configPath} (or run /cliproxyapi config connection) to the CLIProxyAPI /v1 address (e.g. ${DEFAULT_BASE_URL})`;
   if (settings.configInvalid) {
-    items.push({ name: "cliproxyapi.json", status: "error", detail: `${settings.configPath} is not a valid JSON object; the provider ignores it`,
-      action: `Fix the JSON in ${settings.configPath} (or remove the file)` });
+    items.push({ name: "CLIProxyAPI config", status: "error", detail: `${settings.configPath} is not a valid JSON object; the provider does not load its settings`,
+      action: `Fix the JSON in ${settings.configPath} (or remove the file and run /cliproxyapi config)` });
   }
+  if (settings.legacyConfig) {
+    const legacy = settings.legacyConfig;
+    items.push({ name: "former provider config", status: "warn", optional: true,
+      detail: `${legacy.path} (the former @router-for-me provider's) is not read by ${UPSTREAM_PACKAGE}; models are registered as ${name}/<model>`,
+      action: `To keep "${legacy.providerId}/<model>" selections: create ${settings.configPath} with {"providerName": "${legacy.providerId}", "baseUrl": "${legacyBaseUrl(legacy.baseUrl)}"} (or run /cliproxyapi config), then /login ${legacy.providerId} with the API key and /reload` });
+  }
+  items.push({ name: "CLIProxyAPI provider name", status: "ok", detail: `${name} (from ${settings.providerNameSource}); models are ${name}/<model>` });
   if (settings.origin) items.push({ name: "CLIProxyAPI base URL", status: "ok", detail: `${settings.origin} (from ${settings.baseUrlSource})` });
   // The raw value is not shown: a malformed URL can carry credentials.
   else items.push({ name: "CLIProxyAPI base URL", status: "error", detail: `invalid http(s) URL (from ${settings.baseUrlSource})`, action: urlAction });
-  items.push(settings.apiKey
+  if (settings.oauthEntry) {
+    items.push({ name: "CLIProxyAPI login", status: "manual",
+      detail: `auth.json has an OAuth-type ${name} entry (the former provider's /login); ${UPSTREAM_PACKAGE} discovers no models with it`,
+      action: `Run /login ${name} and enter the CLIProxyAPI API key (replaces that entry), then /reload` });
+  }
+  if (!settings.authRequired) items.push({ name: "CLIProxyAPI API key", status: "ok", detail: "not required (authRequired false)" });
+  else items.push(settings.apiKeySource
     ? { name: "CLIProxyAPI API key", status: "ok", detail: `set (from ${settings.apiKeySource})` }
     : { name: "CLIProxyAPI API key", status: "manual", detail: "not set: the provider lists no models", action: keyAction });
   if (!settings.origin || !settings.modelsUrl) return { items };
 
-  const result = await probeEndpoint(settings.modelsUrl, settings.apiKey, options);
+  const sentKey = settings.authRequired ? settings.apiKey : undefined;
+
+  const result = await probeEndpoint(settings.modelsUrl, sentKey, options);
   const server = "CLIProxyAPI server";
   const origin = settings.origin;
   switch (result.kind) {
     case "ok":
-      items.push({ name: server, status: "ok", detail: `models endpoint reachable at ${origin}${settings.apiKey ? ", API key accepted" : ""}` });
+      items.push({ name: server, status: "ok", detail: `models endpoint reachable at ${origin}${sentKey ? ", API key accepted" : ""}` });
       break;
     case "auth":
-      items.push(settings.apiKey
+      items.push(sentKey
         ? { name: server, status: "manual", detail: `reachable at ${origin}, but it rejected the API key (HTTP ${result.status})`, action: keyAction }
         : { name: server, status: "ok", detail: `reachable at ${origin}; requests need the API key (HTTP ${result.status} without it)` });
       break;
@@ -318,13 +351,13 @@ async function runMode(provider: DependencyProvider, mode: DependencyMode, ctx: 
   }
 }
 
-/** Register `/cliproxyapi doctor|install-deps` and answer the umbrella's dependency requests. */
+/** Register `/cliproxyapi-bundle doctor|install-deps` and answer the umbrella's dependency requests. */
 export function registerCliproxyapiCommand(pi: Pick<ExtensionAPI, "registerCommand" | "events">,
   options: CliproxyapiDoctorOptions = {}): DependencyProvider {
   const provider = createCliproxyapiDependencyProvider(options);
   registerDependencyProvider(pi.events, provider);
   pi.registerCommand(CLIPROXYAPI_COMMAND, {
-    description: "pi-cliproxyapi-bundle maintenance: doctor | install-deps",
+    description: "pi-cliproxyapi-bundle maintenance: doctor | install-deps (the provider's own command is /cliproxyapi)",
     getArgumentCompletions: (prefix) => {
       const word = prefix.trimStart().toLowerCase();
       if (/\s/.test(word)) return null;
