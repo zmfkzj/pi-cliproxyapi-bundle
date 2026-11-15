@@ -1,7 +1,9 @@
 /**
  * pi-cliproxyapi-bundle: loads the CLIProxyAPI provider package pi-cliproxyapi-provider (MIT, by 0xRichardH,
  * github.com/0xRichardH/pi-cliproxyapi-provider) as part of oh-my-pi-extensions: its single extension entry (the CLIProxyAPI
- * provider, default id `cpa`, and its `/cliproxyapi config|status|refresh|aliases|models` command), unchanged.
+ * provider, default id `cpa`, and its `/cliproxyapi config|status|refresh|aliases|models` command). The provider loads
+ * through a source overlay (src/overlay.ts, overlay/README.md) that carries this repository's fixes of upstream files;
+ * when the overlay does not apply, the installed package loads unchanged.
  *
  * When the same package is also installed on its own (a `packages` entry in Pi's settings), that install is the one Pi
  * loads and this bundle stays out of the way, so the provider and its command never load twice.
@@ -11,9 +13,12 @@
  * and are registered in every mode, before that decision. They do not use `/cliproxyapi`, which the provider registers.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { getAgentDir, ProjectTrustStore, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerCliproxyapiCommand, type BundleState, type CliproxyapiDoctorOptions } from "./doctor.ts";
+import { prepareProviderOverlay } from "./overlay.ts";
 
 export { checkCliproxyapi, createCliproxyapiDependencyProvider, installCliproxyapi, registerCliproxyapiCommand, resolveConnectionSettings } from "./doctor.ts";
 export type { BundleState, CliproxyapiDoctorOptions } from "./doctor.ts";
@@ -88,9 +93,24 @@ export function decideBundle(options: { env?: NodeJS.ProcessEnv; agentDir?: stri
 }
 
 type Factory = (pi: ExtensionAPI) => unknown;
-/** The upstream entry's default export (resolved from this package's or the umbrella's node_modules). */
-export async function loadUpstream(): Promise<Factory[]> {
-  const modules = await Promise.all(UPSTREAM_ENTRIES.map(entry => import(`${PACKAGE_NAME}/${entry}`) as Promise<{ default: Factory }>));
+
+/** The installed upstream package directory (this package's or the umbrella's node_modules). */
+export function upstreamPackageDir(): string {
+  return dirname(createRequire(import.meta.url).resolve(`${PACKAGE_NAME}/package.json`));
+}
+
+/**
+ * The upstream entry's default export. It is loaded from the bundle's source overlay (src/overlay.ts: a generated copy of
+ * the installed package with the repository-owned fixes in overlay/), or from the installed package unmodified when the
+ * overlay does not apply; `state.overlay` records which and why.
+ */
+export async function loadUpstream(state?: BundleState): Promise<Factory[]> {
+  const overlay = prepareProviderOverlay({ providerDir: upstreamPackageDir() });
+  if (state) state.overlay = overlay;
+  if (overlay.status === "skipped") console.warn(`[pi-cliproxyapi-bundle] provider source overlay skipped: ${overlay.detail}`);
+  const modules = await Promise.all(UPSTREAM_ENTRIES.map(entry => (overlay.status === "applied"
+    ? import(pathToFileURL(join(overlay.dir, entry)).href)
+    : import(`${PACKAGE_NAME}/${entry}`)) as Promise<{ default: Factory }>));
   return modules.map(module => module.default);
 }
 
@@ -99,7 +119,7 @@ export interface CliproxyapiBundleOptions {
   agentDir?: string;
   cwd?: string;
   projectTrusted?: boolean;
-  load?: () => Promise<Factory[]>;
+  load?: (state?: BundleState) => Promise<Factory[]>;
   /** Seams of `/cliproxyapi-bundle doctor|install-deps` (tests): package dir, home dir, fetch, probe timeout, npm runner. */
   doctor?: Omit<CliproxyapiDoctorOptions, "state" | "env" | "agentDir">;
 }
@@ -118,7 +138,7 @@ export function createCliproxyapiBundle(options: CliproxyapiBundleOptions = {}) 
     state.decision = decision;
     if (!decision.load) return;
     try {
-      for (const factory of await (options.load ?? loadUpstream)()) await factory(pi);
+      for (const factory of await (options.load ?? loadUpstream)(state)) await factory(pi);
       state.loaded = true;
     } catch (error) {
       state.loadError = error instanceof Error ? error.message : String(error);

@@ -17,6 +17,8 @@ const CATALOG = { object: "list", data: [
   { id: "gpt-6-astra", object: "model", owned_by: "openai" },
   { id: "claude-opus-4-6", object: "model", owned_by: "anthropic" },
   { id: "fake-model", object: "model", owned_by: "local" },
+  { id: "claude-opus-5-5", object: "model", owned_by: "anthropic" },
+  { id: "bts/claude-opus-5-5", object: "model", owned_by: "anthropic" },
 ] };
 
 async function start(t: TestContext, options: { separateInstall?: boolean; loadSeparate?: boolean; bundled?: string; config?: Record<string, unknown> } = {}) {
@@ -84,6 +86,23 @@ test("the provider loads through the bundle, discovers cpa models and routes the
   assert.equal(h.session.modelRuntime.getModel("cpa", "gpt-6-astra")?.contextWindow, 272_000, "canonical Codex context window by default");
   assert.ok(h.requests.length > 0 && h.requests.every(request => request.url === "/v1/models" && request.auth === "Bearer dummy-test-key"), JSON.stringify(h.requests));
   assert.equal(h.session.modelRuntime.getModel("cliproxyapi", "gpt-6-astra"), undefined, "the former provider id is not used by default");
+});
+
+test("through the source overlay, a routing-prefixed Claude id registers the Anthropic metadata and thinking levels", { timeout: 60_000 }, async (t) => {
+  const h = await start(t);
+  assert.deepEqual(h.errors, []);
+  await h.discover("cpa");
+  const routed = h.session.modelRuntime.getModel("cpa", "bts/claude-opus-5-5");
+  const plain = h.session.modelRuntime.getModel("cpa", "claude-opus-5-5");
+  assert.ok(routed && plain);
+  assert.equal(routed.id, "bts/claude-opus-5-5");
+  assert.equal(routed.reasoning, true);
+  assert.equal(routed.api, "anthropic-messages");
+  assert.deepEqual(routed.thinkingLevelMap, plain.thinkingLevelMap);
+  assert.ok(routed.thinkingLevelMap?.high, "high effort is available");
+  for (const key of ["input", "cost", "contextWindow", "maxTokens", "baseUrl", "compat"] as const) assert.deepEqual(routed[key], plain[key], key);
+  const text = await doctor(h);
+  assert.match(text, /\[ok\] provider source overlay: pi-cliproxyapi-provider \d+\.\d+\.\d+ with src\/matching\.ts from overlay\//);
 });
 
 test("migration: providerName in the provider's config keeps cliproxyapi/<model> ids", { timeout: 60_000 }, async (t) => {

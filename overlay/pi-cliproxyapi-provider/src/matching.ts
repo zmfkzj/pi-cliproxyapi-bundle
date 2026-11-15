@@ -1,0 +1,209 @@
+// pi-cliproxyapi-bundle overlay of pi-cliproxyapi-provider src/matching.ts (MIT, Copyright (c) 2026 Richard Hao,
+// github.com/0xRichardH/pi-cliproxyapi-provider). The upstream file is unchanged except for the routing-prefix
+// fallback in findMetadataMatch (marked below); see overlay/README.md for provenance, guard and update procedure.
+import type { CpaModel } from "./cpa.ts";
+import type { ModelsDevCatalog, ModelsDevMetadata } from "./types.ts";
+
+const CANONICAL_OWNER_PREFIXES: Record<string, string> = {
+  openai: "openai",
+  anthropic: "anthropic",
+  google: "google",
+  deepseek: "deepseek",
+  mistral: "mistral",
+  xai: "xai",
+  zhipuai: "zhipuai",
+  alibaba: "alibaba",
+  moonshotai: "moonshotai",
+  minimax: "minimax",
+  nvidia: "nvidia",
+  cohere: "cohere",
+};
+
+export type MetadataMatchMethod = "alias" | "exact" | "owner-prefix" | "owner-hint" | "suffix" | "normalized-suffix" | "provider-fallback";
+
+export interface MetadataMatch {
+  metadataId: string;
+  metadata: ModelsDevMetadata;
+  method: MetadataMatchMethod;
+}
+
+export function normalizeModelName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function metadataModelName(metadataId: string, metadata: ModelsDevMetadata): string {
+  return metadata.id.split("/").at(-1) ?? metadataId.split("/").at(-1) ?? metadataId;
+}
+
+function oneMatch(candidates: string[]): string | undefined {
+  const unique = [...new Set(candidates)];
+  return unique.length === 1 ? unique[0] : undefined;
+}
+
+interface CatalogIndex {
+  idToKeys: Map<string, string[]>;
+  nameToKeys: Map<string, string[]>;
+  normNameToKeys: Map<string, string[]>;
+}
+
+const catalogIndexes = new WeakMap<object, CatalogIndex>();
+
+function appendKey(index: Map<string, string[]>, value: string, key: string): void {
+  const keys = index.get(value);
+  if (keys) keys.push(key);
+  else index.set(value, [key]);
+}
+
+function buildCatalogIndex(catalog: ModelsDevCatalog): CatalogIndex {
+  const index: CatalogIndex = {
+    idToKeys: new Map(),
+    nameToKeys: new Map(),
+    normNameToKeys: new Map(),
+  };
+  for (const key of Object.keys(catalog)) {
+    const metadata = catalog[key];
+    appendKey(index.idToKeys, metadata.id, key);
+    const name = metadataModelName(key, metadata);
+    appendKey(index.nameToKeys, name, key);
+    appendKey(index.normNameToKeys, normalizeModelName(name), key);
+  }
+  return index;
+}
+
+function getCatalogIndex(catalog: ModelsDevCatalog): CatalogIndex {
+  const cached = catalogIndexes.get(catalog);
+  if (cached) return cached;
+  const index = buildCatalogIndex(catalog);
+  catalogIndexes.set(catalog, index);
+  return index;
+}
+
+function identifierTokens(value: string): string[] {
+  return value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+function containsContiguousTokens(container: string[], sequence: string[]): boolean {
+  if (sequence.length === 0 || sequence.length > container.length) return false;
+  return container.some((_, start) =>
+    start + sequence.length <= container.length &&
+    sequence.every((token, offset) => container[start + offset] === token)
+  );
+}
+
+function sourceProvider(metadataId: string, metadata: ModelsDevMetadata): string {
+  // sourceProvider is retained by current catalog snapshots. The prefix fallback
+  // keeps older bundled/cache snapshots useful until they are refreshed.
+  return metadata.sourceProvider ?? metadataId.split("/")[0] ?? metadataId;
+}
+
+function ownerHintMatch(
+  owner: string | undefined,
+  candidates: string[],
+  catalog: ModelsDevCatalog,
+): string | undefined {
+  if (!owner) return undefined;
+  const ownerTokens = identifierTokens(owner);
+  const matches = candidates.flatMap((metadataId) => {
+    const metadata = catalog[metadataId];
+    if (!metadata) return [];
+    const provider = sourceProvider(metadataId, metadata);
+    const providerTokens = identifierTokens(provider);
+    if (!containsContiguousTokens(ownerTokens, providerTokens)) return [];
+    return [{ metadataId, tokenCount: providerTokens.length, characterCount: provider.length }];
+  });
+  if (matches.length === 0) return undefined;
+
+  const bestTokenCount = Math.max(...matches.map((match) => match.tokenCount));
+  const mostTokens = matches.filter((match) => match.tokenCount === bestTokenCount);
+  const bestCharacterCount = Math.max(...mostTokens.map((match) => match.characterCount));
+  return oneMatch(
+    mostTokens
+      .filter((match) => match.characterCount === bestCharacterCount)
+      .map((match) => match.metadataId),
+  );
+}
+
+/**
+ * Overlay: resolve the full CLIProxyAPI model ID with the upstream rules first. Only when nothing matches and the ID
+ * carries a routing prefix (CLIProxyAPI's credential `prefix`, for example `bts/claude-opus-5-5`), drop the leftmost
+ * `segment/` and resolve the rest with the same rules, one segment at a time, so `bts/anthropic/claude-opus-5-5` still
+ * meets the provider-qualified key `anthropic/claude-opus-5-5` before the bare name is tried. Every step keeps the
+ * upstream uniqueness checks, so an ambiguous remainder stays unmatched instead of picking one candidate. The match
+ * only selects metadata: the model keeps its full ID for overrides and for the request sent to the proxy.
+ */
+export function findMetadataMatch(
+  cpaModel: Pick<CpaModel, "id" | "owned_by">,
+  catalog: ModelsDevCatalog,
+  aliases: Record<string, string>,
+  fallbackProvider?: string | null,
+): MetadataMatch | undefined {
+  const direct = findDirectMetadataMatch(cpaModel, catalog, aliases, fallbackProvider);
+  if (direct) return direct;
+  const slash = cpaModel.id.indexOf("/");
+  if (slash <= 0 || slash === cpaModel.id.length - 1) return undefined;
+  return findMetadataMatch({ id: cpaModel.id.slice(slash + 1), owned_by: cpaModel.owned_by }, catalog, aliases, fallbackProvider);
+}
+
+/** The upstream findMetadataMatch, unchanged: the rules for one model ID. */
+function findDirectMetadataMatch(
+  cpaModel: Pick<CpaModel, "id" | "owned_by">,
+  catalog: ModelsDevCatalog,
+  aliases: Record<string, string>,
+  fallbackProvider?: string | null,
+): MetadataMatch | undefined {
+  const alias = aliases[cpaModel.id];
+  if (alias && catalog[alias]) {
+    return { metadataId: alias, metadata: catalog[alias], method: "alias" };
+  }
+
+  if (catalog[cpaModel.id]) {
+    return { metadataId: cpaModel.id, metadata: catalog[cpaModel.id], method: "exact" };
+  }
+
+  const index = getCatalogIndex(catalog);
+  const exactMetadataCandidates = index.idToKeys.get(cpaModel.id) ?? [];
+  const exactMetadataKey = oneMatch(exactMetadataCandidates);
+  if (exactMetadataKey) {
+    return { metadataId: exactMetadataKey, metadata: catalog[exactMetadataKey], method: "exact" };
+  }
+
+  const suffixCandidates = index.nameToKeys.get(cpaModel.id) ?? [];
+  const normalizedId = normalizeModelName(cpaModel.id);
+  const normalizedSuffixCandidates = index.normNameToKeys.get(normalizedId) ?? [];
+  const owner = cpaModel.owned_by?.trim().toLowerCase();
+  const canonicalOwner = owner ? CANONICAL_OWNER_PREFIXES[owner] : undefined;
+  if (canonicalOwner) {
+    const ownerKey = `${canonicalOwner}/${cpaModel.id}`;
+    if (catalog[ownerKey]) {
+      return { metadataId: ownerKey, metadata: catalog[ownerKey], method: "owner-prefix" };
+    }
+  }
+
+  const hintedKey = ownerHintMatch(owner, normalizedSuffixCandidates, catalog);
+  if (hintedKey) {
+    return { metadataId: hintedKey, metadata: catalog[hintedKey], method: "owner-hint" };
+  }
+
+  const suffixKey = oneMatch(suffixCandidates);
+  if (suffixKey) {
+    return { metadataId: suffixKey, metadata: catalog[suffixKey], method: "suffix" };
+  }
+
+  const normalizedSuffixKey = oneMatch(normalizedSuffixCandidates);
+  if (normalizedSuffixKey) {
+    return { metadataId: normalizedSuffixKey, metadata: catalog[normalizedSuffixKey], method: "normalized-suffix" };
+  }
+
+  if (fallbackProvider) {
+    const normalizedFallbackProvider = fallbackProvider.trim().toLowerCase();
+    const fallbackKey = oneMatch(normalizedSuffixCandidates.filter((metadataId) => {
+      const metadata = catalog[metadataId];
+      return metadata && sourceProvider(metadataId, metadata).toLowerCase() === normalizedFallbackProvider;
+    }));
+    if (fallbackKey) {
+      return { metadataId: fallbackKey, metadata: catalog[fallbackKey], method: "provider-fallback" };
+    }
+  }
+
+  return undefined;
+}

@@ -23,7 +23,10 @@ const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PROVIDER = "cpa";
 const GPT = "gpt-6-astra";
 const CLAUDE = "claude-opus-4-6";
-const CATALOG = { object: "list", data: [{ id: GPT, object: "model", owned_by: "openai" }, { id: CLAUDE, object: "model", owned_by: "anthropic" }] };
+/** A CLIProxyAPI credential-prefix route; its metadata comes from the bundle's source overlay. */
+const ROUTED_CLAUDE = "bts/claude-opus-5-5";
+const CATALOG = { object: "list", data: [{ id: GPT, object: "model", owned_by: "openai" }, { id: CLAUDE, object: "model", owned_by: "anthropic" },
+  { id: ROUTED_CLAUDE, object: "model", owned_by: "anthropic" }] };
 const RESPONSES_PATH = "/v1/responses";
 const MESSAGES_PATH = "/v1/messages";
 const INSTRUCTIONS = "Offline CLIProxyAPI compatibility fixture. Use only the echo tool.";
@@ -354,6 +357,22 @@ test("a failed CLIProxyAPI response is one error outcome with no tool execution"
   assert.deepEqual(h.executions, []);
   assert.deepEqual(assistantEnds(h).map(message => message.stopReason), ["error"]);
   assert.match(assistantEnds(h)[0]?.errorMessage ?? "", /503|offline service unavailable/);
+  assertSettled(h);
+});
+
+test("a routing-prefixed Claude id keeps high thinking and reaches the proxy under its routed id", { timeout: 30_000 }, async t => {
+  const h = await start(t, async (_request, response) => { await sendSSE(response, anthropicFrames()); }, ROUTED_CLAUDE);
+  assert.equal(h.model.reasoning, true, "Anthropic metadata, not the defaults");
+  h.session.setThinkingLevel("high");
+  assert.equal(h.session.thinkingLevel, "high", "not clamped to off");
+  await h.session.prompt("Say hello.");
+  assert.equal(h.requests.length, 1);
+  const [request] = h.requests;
+  assert.equal(request!.url?.split("?")[0], MESSAGES_PATH);
+  assert.equal(request!.body.model, ROUTED_CLAUDE, "the proxy routes by the full id");
+  assert.equal((request!.body.thinking as { type?: string } | undefined)?.type, "adaptive");
+  assert.deepEqual(request!.body.output_config, { effort: "high" });
+  assert.deepEqual(assistantEnds(h).map(message => message.stopReason), ["stop"]);
   assertSettled(h);
 });
 

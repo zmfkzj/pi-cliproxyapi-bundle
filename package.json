@@ -11,6 +11,7 @@
   ],
   "files": [
     "src",
+    "overlay",
     "README.md"
   ],
   "pi": {

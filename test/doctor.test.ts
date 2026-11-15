@@ -214,6 +214,22 @@ test("which install is active: bundled, separate, off, forced on twice, failed l
   assert.match(failed.action ?? "", /\/cliproxyapi-bundle install-deps/);
 });
 
+test("provider source overlay: ok when applied, a warning with the update action when skipped, absent when not loaded", async (t) => {
+  const s = setup(t);
+  const fetch = (async () => new Response("{}")) as typeof globalThis.fetch;
+  const overlay = async (state: BundleState) =>
+    item(await checkCliproxyapi(options(s, { CLIPROXYAPI_API_KEY: KEY }, { fetch, state })), "provider source overlay");
+  assert.deepEqual(await overlay({ ...BUNDLED, overlay: { status: "applied", dir: "/x", detail: "pi-cliproxyapi-provider 0.16.13 with src/matching.ts from overlay/" } }),
+    { name: "provider source overlay", status: "ok", detail: "pi-cliproxyapi-provider 0.16.13 with src/matching.ts from overlay/ (routing-prefixed model IDs resolve their metadata)" });
+  const skipped = await overlay({ ...BUNDLED, overlay: { status: "skipped", detail: "pi-cliproxyapi-provider 0.17.0 changed src/matching.ts since the overlay was written for 0.16.13; the unmodified provider is loaded" } });
+  assert.equal(skipped?.status, "warn");
+  assert.match(skipped?.detail ?? "", /bts\/claude-opus-5-5 get default metadata/);
+  assert.match(skipped?.action ?? "", /overlay\/README\.md/);
+  assert.equal(await overlay(BUNDLED), undefined, "no overlay state: no item");
+  assert.equal(await overlay({ decision: { load: false, reason: "installed on its own" }, separateInstalls: () => ["/a/settings.json"],
+    overlay: { status: "skipped", detail: "x" } }), undefined, "a separate install never uses the overlay");
+});
+
 test("install-deps: npm install when missing, then ok when repeated; check never runs npm", async (t) => {
   const s = setup(t, { installed: false });
   const server = await serve(t, gateway);

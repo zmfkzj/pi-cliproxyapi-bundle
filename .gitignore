@@ -5,3 +5,4 @@ coverage/
 .orche/
 .codegraph/*
 !.codegraph/.gitignore
+.provider-overlay/

@@ -1,0 +1,11 @@
+{
+  "package": "pi-cliproxyapi-provider",
+  "upstream": "github.com/0xRichardH/pi-cliproxyapi-provider (MIT, Copyright (c) 2026 Richard Hao)",
+  "writtenFor": "0.16.13",
+  "files": {
+    "src/matching.ts": {
+      "upstreamSha256": "038bd5ed1d639a758480d3821f16615648853f9c5de4fe3b4eba32a2099ac627",
+      "change": "Routing-prefixed model IDs (bts/claude-opus-5-5) fall back to the metadata of the ID without the prefix when the full ID matches nothing."
+    }
+  }
+}

@@ -18,6 +18,7 @@ import {
   formatDependencyReport, insideNodeModules, installNpmDependencies, registerDependencyProvider, runProcess,
   type DependencyItem, type DependencyMode, type DependencyProvider, type DependencyReport,
 } from "./dependencies.ts";
+import type { OverlayResult } from "./overlay.ts";
 
 export const CLIPROXYAPI_DEPENDENCY_ID = "cliproxyapi";
 export const CLIPROXYAPI_LABEL = "pi-cliproxyapi-bundle";
@@ -40,6 +41,8 @@ export interface BundleState {
   /** Whether the bundled upstream entries finished loading. */
   loaded?: boolean;
   loadError?: string;
+  /** Whether the provider loaded from the source overlay (src/overlay.ts), and why not. */
+  overlay?: OverlayResult;
   /** The settings files that install the upstream package on its own (computed on demand). */
   separateInstalls?: () => string[];
 }
@@ -218,6 +221,14 @@ function providerItem(state: BundleState | undefined, env: NodeJS.ProcessEnv): D
     action: `Unset PI_CLIPROXYAPI_BUNDLED (or set it to auto) and restart Pi, or install it on its own: pi install npm:${UPSTREAM_PACKAGE}` };
 }
 
+function overlayItem(overlay: OverlayResult | undefined): DependencyItem | undefined {
+  if (!overlay) return undefined;
+  const name = "provider source overlay";
+  if (overlay.status === "applied") return { name, status: "ok", detail: `${overlay.detail} (routing-prefixed model IDs resolve their metadata)` };
+  return { name, status: "warn", detail: `${overlay.detail}. Routing-prefixed model IDs such as bts/claude-opus-5-5 get default metadata (no reasoning)`,
+    action: "Update the bundle (pi update), or port overlay/ to the installed provider version (overlay/README.md)" };
+}
+
 function npmItem(packageDir: string, bundleActive: boolean): DependencyItem {
   const name = `npm ${UPSTREAM_PACKAGE}`;
   const dir = installedPackageDir(packageDir, UPSTREAM_PACKAGE);
@@ -246,7 +257,9 @@ export async function checkCliproxyapi(options: CliproxyapiDoctorOptions = {}): 
   const env = options.env ?? process.env;
   const items: DependencyItem[] = [];
   const provider = providerItem(options.state, env);
+  const overlay = options.state?.decision?.load ? overlayItem(options.state.overlay) : undefined;
   if (provider) items.push(provider);
+  if (overlay) items.push(overlay);
   items.push(npmItem(packageDir, options.state?.decision?.load ?? true));
 
   const settings = resolveConnectionSettings(agentDir, env, options.homeDir);
