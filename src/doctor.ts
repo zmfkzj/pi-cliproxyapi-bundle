@@ -6,7 +6,8 @@
 // check() is read-only. It resolves the CLIProxyAPI connection the way the upstream provider does
 // (src/config.ts loadConfig and src/registration.ts in pi-cliproxyapi-provider: env > ~/.pi/agent/pi-cliproxyapi-provider/
 // config.json (under the home directory, not PI_CODING_AGENT_DIR) > defaults; models at `<baseUrl>/models`; key from a
-// stored `/login <provider>` API key, then config `apiKey`, then CLIPROXYAPI_API_KEY) without importing it (the bundled
+// stored `/login <provider>` API key, then config `apiKey`, then CLIPROXYAPI_API_KEY; a stored entry that is not an API
+// key, such as the former provider's OAuth login, blocks the others as in Pi) without importing it (the bundled
 // copy may be missing), and sends at most one short GET to that models endpoint. Keys are reported as set / not set and
 // never printed; `!command` keys are never run.
 import { existsSync, readFileSync } from "node:fs";
@@ -25,6 +26,8 @@ export const CLIPROXYAPI_LABEL = "pi-cliproxyapi-bundle";
 export const CLIPROXYAPI_COMMAND = "cliproxyapi-bundle";
 export const UPSTREAM_PACKAGE = "pi-cliproxyapi-provider";
 export const DEFAULT_PROVIDER_NAME = "cpa";
+/** The former @router-for-me provider's id, the usual `providerName` after a migration. */
+export const LEGACY_PROVIDER_NAME = "cliproxyapi";
 export const DEFAULT_BASE_URL = "http://localhost:8317/v1";
 export const PROBE_TIMEOUT_MS = 3_000;
 export const CLIPROXYAPI_USAGE = "Usage: /cliproxyapi-bundle doctor (check the provider, CLIProxyAPI server and API key) | /cliproxyapi-bundle install-deps";
@@ -121,6 +124,13 @@ export interface ConnectionSettings {
   apiKeySource?: string;
   /** auth.json holds an OAuth-type entry for the provider name (the former provider's `/login`), which this provider cannot use. */
   oauthEntry?: boolean;
+  /**
+   * Type of an auth.json entry for the provider name that yields no API key (OAuth, another type, or an API key entry
+   * without a key). Pi lets a stored entry own the provider: config `apiKey` and CLIPROXYAPI_API_KEY are then not used.
+   */
+  unusableEntry?: string;
+  /** Other provider names this bundle knows (cpa, cliproxyapi) with a stored API key login that Pi does not use for this one. */
+  otherLogins?: string[];
   /** The former provider's `<agentDir>/cliproxyapi.json`, when it exists and the new config does not. */
   legacyConfig?: { path: string; providerId: string; baseUrl: string };
 }
@@ -147,15 +157,27 @@ export function resolveConnectionSettings(agentDir: string, env: NodeJS.ProcessE
   const [baseUrl, baseUrlSource] = pick([[env.CLIPROXYAPI_BASE_URL, "CLIPROXYAPI_BASE_URL"], [file.baseUrl, "config.json baseUrl"],
     [DEFAULT_BASE_URL, "default"]])!;
   const authRequired = parseBoolean(env.CLIPROXYAPI_AUTH_REQUIRED) ?? (typeof file.authRequired === "boolean" ? file.authRequired : true);
-  const entry = readJsonObject(join(agentDir, "auth.json")).value[providerName] as Record<string, unknown> | undefined;
-  // Pi's order: a stored `/login` API key, then the provider's `apiKey` (config `apiKey`, else `$CLIPROXYAPI_API_KEY`).
-  const stored = entry?.type === "api_key" ? firstNonEmpty(entry.key) : undefined;
+  const auth = readJsonObject(join(agentDir, "auth.json")).value;
+  const entry = auth[providerName] as Record<string, unknown> | undefined;
+  // Pi's order (pi-ai auth/resolve.ts, provider-composer.ts): a stored auth.json entry owns the provider; only an API key
+  // entry with a key resolves, and nothing else is consulted when an entry exists. Without one: the provider's `apiKey`
+  // (config `apiKey`, else `$CLIPROXYAPI_API_KEY`).
+  const hasEntry = entry !== null && typeof entry === "object";
+  const stored = hasEntry && entry.type === "api_key" ? firstNonEmpty(entry.key) : undefined;
   const configKey = firstNonEmpty(file.apiKey);
-  const key = stored ? [stored, `auth.json ${providerName} login`]
+  const key = hasEntry
+    ? stored ? [stored, stored.startsWith("!") ? `auth.json ${providerName} login command, not run here` : `auth.json ${providerName} login`] : undefined
     : configKey ? [configKey, configKey.startsWith("!") ? "config.json apiKey command, not run here" : "config.json apiKey"]
     : pick([[env.CLIPROXYAPI_API_KEY, "CLIPROXYAPI_API_KEY"]]);
+  const unusableEntry = hasEntry && !stored
+    ? (entry.type === "api_key" ? "api_key without a key" : typeof entry.type === "string" ? entry.type : "unknown") : undefined;
+  const otherLogins = [DEFAULT_PROVIDER_NAME, LEGACY_PROVIDER_NAME].filter((name) => {
+    const other = auth[name] as Record<string, unknown> | undefined;
+    return name !== providerName && other?.type === "api_key" && !!firstNonEmpty(other.key);
+  });
   const settings: ConnectionSettings = { providerName, providerNameSource, configPath, configInvalid: config.invalid, baseUrlSource, authRequired,
-    apiKey: key && !key[0].startsWith("!") ? key[0] : undefined, apiKeySource: key?.[1], oauthEntry: entry?.type === "oauth" };
+    apiKey: key && !key[0].startsWith("!") ? key[0] : undefined, apiKeySource: key?.[1], oauthEntry: hasEntry && entry.type === "oauth",
+    ...(unusableEntry ? { unusableEntry } : {}), ...(otherLogins.length > 0 ? { otherLogins } : {}) };
   const legacyPath = join(agentDir, "cliproxyapi.json");
   if (!existsSync(configPath) && existsSync(legacyPath)) {
     const legacy = readJsonObject(legacyPath).value;
@@ -280,15 +302,25 @@ export async function checkCliproxyapi(options: CliproxyapiDoctorOptions = {}): 
   if (settings.origin) items.push({ name: "CLIProxyAPI base URL", status: "ok", detail: `${settings.origin} (from ${settings.baseUrlSource})` });
   // The raw value is not shown: a malformed URL can carry credentials.
   else items.push({ name: "CLIProxyAPI base URL", status: "error", detail: `invalid http(s) URL (from ${settings.baseUrlSource})`, action: urlAction });
-  if (settings.oauthEntry) {
+  const unresolved = '/cliproxyapi refresh models fails with "CPA discovery requires a resolved credential" and the provider lists no models';
+  const loginAction = `Run /login ${name} and enter the CLIProxyAPI API key (replaces that entry), then /reload and /cliproxyapi refresh models`;
+  if (settings.unusableEntry && settings.authRequired) {
     items.push({ name: "CLIProxyAPI login", status: "manual",
-      detail: `auth.json has an OAuth-type ${name} entry (the former provider's /login); ${UPSTREAM_PACKAGE} discovers no models with it`,
-      action: `Run /login ${name} and enter the CLIProxyAPI API key (replaces that entry), then /reload` });
+      detail: settings.oauthEntry
+        ? `auth.json has an OAuth-type ${name} entry (the former provider's /login); ${UPSTREAM_PACKAGE} discovers no models with it`
+        : `auth.json has a ${name} entry (${settings.unusableEntry}) that yields no API key: ${unresolved}`,
+      action: loginAction });
   }
   if (!settings.authRequired) items.push({ name: "CLIProxyAPI API key", status: "ok", detail: "not required (authRequired false)" });
-  else items.push(settings.apiKeySource
-    ? { name: "CLIProxyAPI API key", status: "ok", detail: `set (from ${settings.apiKeySource})` }
-    : { name: "CLIProxyAPI API key", status: "manual", detail: "not set: the provider lists no models", action: keyAction });
+  else if (settings.apiKeySource) items.push({ name: "CLIProxyAPI API key", status: "ok", detail: `set (from ${settings.apiKeySource})` });
+  else {
+    const others = settings.otherLogins?.length
+      ? `; auth.json has an API key login only under ${settings.otherLogins.join(", ")}, which Pi does not use for ${name}` : "";
+    items.push(settings.unusableEntry
+      ? { name: "CLIProxyAPI API key", status: "manual",
+        detail: `not resolved: the auth.json ${name} entry takes precedence over config apiKey and CLIPROXYAPI_API_KEY, and ${unresolved}${others}`, action: loginAction }
+      : { name: "CLIProxyAPI API key", status: "manual", detail: `not set: ${unresolved}${others}`, action: keyAction });
+  }
   if (!settings.origin || !settings.modelsUrl) return { items };
 
   const sentKey = settings.authRequired ? settings.apiKey : undefined;

@@ -137,6 +137,36 @@ test("migration from the former provider: its cliproxyapi.json and OAuth-type lo
   assert.equal(item(migrated, "CLIProxyAPI API key")?.status, "manual", "an OAuth-type entry is no API key");
 });
 
+test("a stored entry owns the provider as in Pi: no fallback to config or env keys; logins under other names are named, never shown", async (t) => {
+  const s = setup(t);
+  const server = await serve(t, gateway);
+  s.writeConfig({ providerName: "cliproxyapi", baseUrl: `${server.url}/v1`, apiKey: KEY });
+  // The former provider's OAuth login blocks config apiKey and CLIPROXYAPI_API_KEY; the probe sends no key.
+  writeFileSync(join(s.agentDir, "auth.json"), JSON.stringify({ cliproxyapi: { type: "oauth", access: "former-access", refresh: "r", expires: 1 } }));
+  requests.length = 0;
+  const oauth = await checkCliproxyapi(options(s, { CLIPROXYAPI_API_KEY: KEY }));
+  assert.equal(item(oauth, "CLIProxyAPI login")?.status, "manual");
+  assert.equal(item(oauth, "CLIProxyAPI API key")?.status, "manual");
+  assert.match(item(oauth, "CLIProxyAPI API key")?.detail ?? "", /^not resolved: the auth\.json cliproxyapi entry takes precedence .*"CPA discovery requires a resolved credential"/);
+  assert.match(item(oauth, "CLIProxyAPI API key")?.action ?? "", /^Run \/login cliproxyapi and enter the CLIProxyAPI API key \(replaces that entry\), then \/reload and \/cliproxyapi refresh models$/);
+  assert.deepEqual(requests.map((request) => request.auth), [undefined], "the blocked key is not probed");
+  // An API key entry without a key blocks them too.
+  writeFileSync(join(s.agentDir, "auth.json"), JSON.stringify({ cliproxyapi: { type: "api_key", key: "" } }));
+  const empty = await checkCliproxyapi(options(s, { CLIPROXYAPI_API_KEY: KEY }));
+  assert.match(item(empty, "CLIProxyAPI login")?.detail ?? "", /^auth\.json has a cliproxyapi entry \(api_key without a key\) that yields no API key/);
+  // Only a login under the default name cpa: not used for cliproxyapi.
+  writeFileSync(join(s.agentDir, "auth.json"), JSON.stringify({ cpa: { type: "api_key", key: KEY }, typesafe: { type: "api_key", key: "x" } }));
+  s.writeConfig({ providerName: "cliproxyapi", baseUrl: `${server.url}/v1` });
+  const other = await checkCliproxyapi(options(s, {}));
+  assert.equal(item(other, "CLIProxyAPI login"), undefined);
+  assert.match(item(other, "CLIProxyAPI API key")?.detail ?? "", /^not set: .*; auth\.json has an API key login only under cpa, which Pi does not use for cliproxyapi$/);
+  assert.match(item(other, "CLIProxyAPI API key")?.action ?? "", /^Run \/login cliproxyapi \(API key\)/);
+  // authRequired false: a stored entry does not matter.
+  const open = await checkCliproxyapi(options(s, { CLIPROXYAPI_AUTH_REQUIRED: "false" }));
+  assert.equal(item(open, "CLIProxyAPI API key")?.status, "ok");
+  for (const report of [oauth, empty, other, open]) assert.ok(![KEY, "former-access"].some((secret) => JSON.stringify(report).includes(secret)));
+});
+
 test("missing or rejected API key: manual with the login action; the key is never shown", async (t) => {
   const s = setup(t);
   const server = await serve(t, gateway);

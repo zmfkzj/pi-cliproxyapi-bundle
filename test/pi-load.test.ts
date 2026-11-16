@@ -21,11 +21,13 @@ const CATALOG = { object: "list", data: [
   { id: "bts/claude-opus-5-5", object: "model", owned_by: "anthropic" },
 ] };
 
-async function start(t: TestContext, options: { separateInstall?: boolean; loadSeparate?: boolean; bundled?: string; config?: Record<string, unknown> } = {}) {
+async function start(t: TestContext, options: { separateInstall?: boolean; loadSeparate?: boolean; bundled?: string; config?: Record<string, unknown>;
+  auth?: Record<string, unknown>; envKey?: false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pi cliproxyapi it "));
   const agentDir = join(root, "agent");
   mkdirSync(agentDir, { recursive: true });
   if (options.separateInstall) writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [`npm:${PACKAGE_NAME}`] }));
+  if (options.auth) writeFileSync(join(agentDir, "auth.json"), JSON.stringify(options.auth), { mode: 0o600 });
   const requests: { url: string; auth: string | undefined }[] = [];
   const server: Server = createServer((request, response) => {
     requests.push({ url: request.url ?? "", auth: request.headers.authorization });
@@ -35,6 +37,7 @@ async function start(t: TestContext, options: { separateInstall?: boolean; loadS
   await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
   const port = (server.address() as { port: number }).port;
   const restore = isolateProvider(t, root, agentDir, `http://127.0.0.1:${port}/v1`, options.bundled ?? "auto");
+  if (options.envKey === false) delete process.env.CLIPROXYAPI_API_KEY; // restored by restore()
   if (options.config) {
     mkdirSync(join(root, ".pi", "agent", "pi-cliproxyapi-provider"), { recursive: true });
     writeFileSync(join(root, ".pi", "agent", "pi-cliproxyapi-provider", "config.json"), JSON.stringify(options.config));
@@ -65,7 +68,7 @@ async function start(t: TestContext, options: { separateInstall?: boolean; loadS
     const result = await session!.modelRuntime.refresh({ providers: [provider], allowNetwork: true, force: true });
     assert.deepEqual([...result.errors.entries()].map(([id, error]) => `${id}: ${String(error)}`), []);
   };
-  return { loader, session, errors, requests, discover, port };
+  return { loader, session, errors, requests, discover, port, root };
 }
 
 const commandNames = (session: AgentSession) => session.extensionRunner.getRegisteredCommands().map(command => command.invocationName);
@@ -146,12 +149,61 @@ test("PI_CLIPROXYAPI_BUNDLED=off loads no provider but keeps /cliproxyapi-bundle
   assert.match(text, /\[manual\] CLIProxyAPI provider: not loaded: PI_CLIPROXYAPI_BUNDLED=off, and no separate install\n {6}-> Unset PI_CLIPROXYAPI_BUNDLED/);
 });
 
+// `/cliproxyapi refresh models` (the upstream handler) asks Pi for the key of the configured provider name. Pi lets a
+// stored auth.json entry own the provider: an API key login resolves; an OAuth-type entry (the former provider's login)
+// or a login stored under another name does not, and CLIPROXYAPI_API_KEY is then not consulted.
+const STORED_KEY = "sk-stored-login-0123456789";
+const FORMER_OAUTH = { type: "oauth", access: "former-access", refresh: "former-refresh", expires: 1 };
+for (const scenario of [
+  { title: "a login stored only under cpa", auth: { cpa: { type: "api_key", key: STORED_KEY } }, envKey: false as const,
+    doctor: /\[manual\] CLIProxyAPI API key: not set: .*"CPA discovery requires a resolved credential".*API key login only under cpa, which Pi does not use for cliproxyapi\n {6}-> Run \/login cliproxyapi \(API key\)/ },
+  { title: "the former provider's OAuth login, even with CLIPROXYAPI_API_KEY set", auth: { cliproxyapi: FORMER_OAUTH },
+    doctor: /\[manual\] CLIProxyAPI API key: not resolved: the auth\.json cliproxyapi entry takes precedence over config apiKey and CLIPROXYAPI_API_KEY.*\n {6}-> Run \/login cliproxyapi and enter the CLIProxyAPI API key/ },
+  { title: "no login and no CLIPROXYAPI_API_KEY", auth: undefined, envKey: false as const,
+    doctor: /\[manual\] CLIProxyAPI API key: not set: \/cliproxyapi refresh models fails with "CPA discovery requires a resolved credential"/ },
+]) {
+  test(`providerName cliproxyapi with ${scenario.title}: refresh models fails before any request and doctor names the fix`, { timeout: 60_000 }, async (t) => {
+    const h = await start(t, { config: { providerName: "cliproxyapi" }, auth: scenario.auth, envKey: scenario.envKey });
+    assert.deepEqual(h.errors, []);
+    h.requests.length = 0;
+    const text = await refreshModels(h);
+    assert.match(text, /CPA models: failed \(CPA discovery requires a resolved credential\); retained previous snapshot/);
+    assert.match(text, /Registered: 0 models/);
+    assert.deepEqual(h.requests, [], "no request without a resolved credential");
+    const report = await doctor(h);
+    assert.match(report, scenario.doctor);
+    for (const secret of [STORED_KEY, "former-access", "former-refresh", "dummy-test-key"]) assert.ok(!report.includes(secret), "no secret in the report");
+  });
+}
+
+test("providerName cliproxyapi with an API key login under cliproxyapi: refresh models discovers with that key", { timeout: 60_000 }, async (t) => {
+  const h = await start(t, { config: { providerName: "cliproxyapi" }, auth: { cliproxyapi: { type: "api_key", key: STORED_KEY } }, envKey: false });
+  assert.deepEqual(h.errors, []);
+  h.requests.length = 0;
+  const text = await refreshModels(h);
+  assert.match(text, /CPA models: (updated|unchanged)/);
+  assert.doesNotMatch(text, /Registered: 0 models/);
+  assert.deepEqual(h.requests, [{ url: "/v1/models", auth: `Bearer ${STORED_KEY}` }]);
+  assert.match(await doctor(h), /\[ok\] CLIProxyAPI API key: set \(from auth\.json cliproxyapi login\)/);
+});
+
 /** Run the registered `/cliproxyapi-bundle doctor` and return its notification. */
 async function doctor(h: Awaited<ReturnType<typeof start>>): Promise<string> {
   const command = h.session.extensionRunner.getRegisteredCommands().find(entry => entry.name === "cliproxyapi-bundle");
   assert.ok(command, "/cliproxyapi-bundle registered");
   const notes: string[] = [];
   await command.handler("doctor", { ui: { notify: (text: string) => notes.push(text), setStatus: () => {} } } as never);
+  assert.equal(notes.length, 1);
+  return notes[0]!;
+}
+
+/** Run the upstream `/cliproxyapi refresh models` handler with Pi's model registry and return its notification. */
+async function refreshModels(h: Awaited<ReturnType<typeof start>>): Promise<string> {
+  const command = h.session.extensionRunner.getRegisteredCommands().find(entry => entry.name === "cliproxyapi");
+  assert.ok(command, "/cliproxyapi registered");
+  const notes: string[] = [];
+  const { modelRegistry } = h.session.extensionRunner.createCommandContext();
+  await command.handler("refresh models", { cwd: h.root, modelRegistry, ui: { notify: (text: string) => notes.push(text) } } as never);
   assert.equal(notes.length, 1);
   return notes[0]!;
 }
