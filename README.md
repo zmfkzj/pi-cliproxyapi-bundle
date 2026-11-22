@@ -10,8 +10,8 @@ pi install git:github.com/zmfkzj/pi-cliproxyapi-bundle   # on its own; the umbre
 
 ## Version and compatibility
 
-- This package depends on `pi-cliproxyapi-provider` `^0.16.13`; its `package-lock.json` pins 0.16.13 (npm integrity recorded), so an install (on its own, or by the umbrella's bootstrap, which runs `npm install` in each submodule) is reproducible.
-- Upstream declares optional peers `@earendil-works/pi-ai`, `pi-coding-agent` and `pi-tui` `>=0.87.0` (host-provided, never installed as copies) and has no runtime dependencies. Loading, model discovery and offline SSE streaming are verified with coding-agent **1.5.2**, pi-ai **1.5.2**, and provider **0.16.13** with the source overlay.
+- This package depends on `pi-cliproxyapi-provider` `^0.16.20`; its `package-lock.json` pins 0.16.20 (npm integrity recorded), so an install (on its own, or by the umbrella's bootstrap, which runs `npm install` in each submodule) is reproducible.
+- Upstream declares optional peers `@earendil-works/pi-ai`, `pi-coding-agent` and `pi-tui` `>=0.87.0` (host-provided, never installed as copies) and has no runtime dependencies. Loading, model discovery and offline SSE streaming are verified with coding-agent **1.6.0**, pi-ai **1.6.0**, and provider **0.16.20** (the locked version) with the source overlay.
 - Upstream patches no Pi internals and keeps no shared patched-module cache, so this bundle no longer has the former provider's Codex module-cache protection (`src/codex-cache.ts` was removed with it).
 
 ## Migrating from the former provider
