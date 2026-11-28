@@ -43,6 +43,8 @@ const DIRECT_CONTEXT: Context = {
   tools: [{ name: "echo", description: "Echo test data", parameters: TOOL_PARAMETERS }],
 };
 const USAGE = { input_tokens: 12, input_tokens_details: { cached_tokens: 3 }, output_tokens: 5, total_tokens: 17 };
+// GPT-5.6+ also reports the prefix it wrote to the cache; input_tokens includes both cached and written tokens.
+const USAGE_WITH_CACHE_WRITE = { input_tokens: 12, input_tokens_details: { cached_tokens: 3, cache_write_tokens: 2 }, output_tokens: 5, total_tokens: 17 };
 
 type WireBody = { model: string; stream: boolean; tools?: Record<string, unknown>[]; input?: Record<string, unknown>[]; [key: string]: unknown };
 type WireRequest = { method: string | undefined; url: string | undefined; headers: IncomingHttpHeaders; body: WireBody };
@@ -73,7 +75,7 @@ function textFrames(): Frame[] {
     { type: "response.output_text.delta", output_index: 0, item_id: item.id, delta: "Tool result " },
     { type: "response.output_text.delta", output_index: 0, item_id: item.id, delta: "accepted." },
     { type: "response.output_item.done", output_index: 0, item: { ...item, status: "completed", content: [{ type: "output_text", text: "Tool result accepted." }] } },
-    { type: "response.completed", response: { id: "resp_final", status: "completed", usage: USAGE } },
+    { type: "response.completed", response: { id: "resp_final", status: "completed", usage: USAGE_WITH_CACHE_WRITE } },
   ];
 }
 
@@ -227,6 +229,11 @@ function assistantEnds(h: Harness): AssistantMessage[] {
   return h.events.flatMap(event => event.type === "message_end" && event.message.role === "assistant" ? [event.message] : []);
 }
 
+function usageOf(message: AssistantMessage | undefined) {
+  const usage = message?.usage;
+  return usage && { input: usage.input, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, output: usage.output, totalTokens: usage.totalTokens };
+}
+
 function assertSettled(h: Harness, aborted = false): void {
   assert.deepEqual(h.events.filter(event => event.type === "agent_settled"), [{ type: "agent_settled", aborted }]);
   assert.equal(h.session.isIdle, true);
@@ -266,9 +273,10 @@ test("Codex GPT over Responses: fragmented arguments execute once and the result
   assert.deepEqual(ends.map(message => message.stopReason), ["toolUse", "stop"]);
   assert.equal(ends[0]?.provider, PROVIDER);
   assert.deepEqual(ends[0]?.content, [{ type: "toolCall", id: TOOL_ID, name: "echo", arguments: args }]);
-  assert.equal(ends[0]?.usage.input, 9);
-  assert.equal(ends[0]?.usage.cacheRead, 3);
-  assert.equal(ends[0]?.usage.output, 5);
+  // Without cache_write_tokens: input is input_tokens minus the cached tokens.
+  assert.deepEqual(usageOf(ends[0]), { input: 9, cacheRead: 3, cacheWrite: 0, output: 5, totalTokens: 17 });
+  // With input_tokens_details.cache_write_tokens: written tokens leave input and count as cacheWrite.
+  assert.deepEqual(usageOf(ends[1]), { input: 7, cacheRead: 3, cacheWrite: 2, output: 5, totalTokens: 17 });
   const updates = h.events.flatMap(event => event.type === "message_update" ? [event.assistantMessageEvent] : []);
   assert.equal(updates.filter(event => event.type === "toolcall_start").length, 1);
   assert.equal(updates.filter(event => event.type === "toolcall_end").length, 1);
